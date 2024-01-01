@@ -1,6 +1,12 @@
 // recompresses tar gz files by varying their order to maximize compression
 package main
 
+// TODO:
+// adjust findfirst to exclude files over a certain size
+// adjust compression ratio to favor header similarity
+// adjust GetNext to search within binariers before next directory/symlink
+// adjust GetNext to try permutations up to a buffer size
+
 import (
 	"archive/tar"
 	"bytes"
@@ -67,10 +73,14 @@ func cacheKey(perm []int) int64 {
 	return int64(perm[0])<<32 + int64(perm[1])
 }
 
-func getNext(origPerm []int, origContent []*tarEntry, jobs chan<- *job, results chan *result) *result {
+func getNext(origPerm []int, origContent []*tarEntry, limit int64, jobs chan<- *job, results chan *result) *result {
 	jobCount := 0
 	for i := range origContent {
 		if slices.Contains(origPerm, i) {
+			continue
+		}
+
+		if limit > 0 && origContent[i].header.Size > limit {
 			continue
 		}
 
@@ -142,7 +152,13 @@ func recompress(fn string) error {
 			continue
 		}
 
-		result := getNext(append(currentPerm, i), originalContents, jobs, results)
+		windowsize := int64(32000)
+		if originalContents[i].header.Size > windowsize {
+			fmt.Println("skipping", i)
+			continue
+		}
+
+		result := getNext(append(currentPerm, i), originalContents, windowsize, jobs, results)
 
 		if firstBestResult == nil || compareCompression(result, firstBestResult) {
 			firstBestResult = result
@@ -152,8 +168,11 @@ func recompress(fn string) error {
 	currentPerm = append(currentPerm, firstBestResult.perm...)
 	fmt.Println("firstPerm", currentPerm)
 
-	for i := 0; i < origContentLen-len(currentPerm); i++ {
-		result := getNext(currentPerm, originalContents, jobs, results) //TODO: cache previous comparisons
+	for {
+		result := getNext(currentPerm, originalContents, 0, jobs, results)
+		if result == nil {
+			break
+		}
 		currentPerm = append(currentPerm, result.perm[1])
 		fmt.Println("nextPerm", currentPerm)
 	}
