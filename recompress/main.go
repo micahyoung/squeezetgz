@@ -58,50 +58,63 @@ func cacheKey(perm []int) string {
 }
 
 func getNext(origPerm []int, origContent []*internal.TarEntry, batchSize int64, jobs chan<- *job, results chan *result) *result {
-	testPerm := []int{}
-	totalUncompressed := int64(0)
 	jobCount := 0
+	lastIdx := origPerm[len(origPerm)-1]
 	for i := range origContent {
 		if slices.Contains(origPerm, i) {
 			continue
 		}
 
+		testPerm := origPerm
+
+		// if filesize is large, add directly to perm
+		if origContent[i].Header.Size >= batchSize {
+			comboPerm := []int{lastIdx, i}
+
+			cachekey := cacheKey(comboPerm)
+
+			// check for cached result
+			if cachedResult, ok := jobCache[cachekey]; ok {
+				go func() {
+					results <- cachedResult
+				}()
+			} else {
+				go func(comboPerm []int) {
+					jobs <- &job{perm: comboPerm}
+				}(comboPerm)
+			}
+
+			jobCount++
+
+			continue
+		}
+
 		testPerm = append(testPerm, i)
-		totalUncompressed += origContent[i].Header.Size
+		// fmt.Printf("testPerm %v\n", testPerm)
 
-		// add another file if under batch size or perm count limit
-		if totalUncompressed >= batchSize || len(testPerm) > 3 {
-			break
+		// otherwise, compare with next files
+		for j := range origContent {
+			if slices.Contains(testPerm, j) {
+				continue
+			}
+
+			comboPerm := []int{lastIdx, i, j}
+
+			cachekey := cacheKey(comboPerm)
+
+			// check for cached result
+			if cachedResult, ok := jobCache[cachekey]; ok {
+				go func() {
+					results <- cachedResult
+				}()
+			} else {
+				go func(comboPerm []int) {
+					jobs <- &job{perm: comboPerm}
+				}(comboPerm)
+			}
+
+			jobCount++
 		}
-	}
-
-	initPerm := make([]int, len(testPerm))
-	statePerm := make([]int, len(testPerm))
-	copy(initPerm, testPerm)
-
-	for {
-		if !nextPerm(statePerm) {
-			break
-		}
-
-		perm := getPerm(initPerm, statePerm)
-		comboPerm := append(origPerm[len(origPerm)-1:], perm...)
-		fmt.Println("comboPerm", comboPerm)
-
-		cachekey := cacheKey(comboPerm)
-
-		// check for cached result
-		if cachedResult, ok := jobCache[cachekey]; ok {
-			go func() {
-				results <- cachedResult
-			}()
-		} else {
-			go func() {
-				jobs <- &job{perm: comboPerm}
-			}()
-		}
-
-		jobCount++
 	}
 
 	var bestBatchResult *result
@@ -229,7 +242,7 @@ func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs c
 			break
 		}
 
-		currentPerm = append(currentPerm, result.perm[1])
+		currentPerm = append(currentPerm, result.perm[1:]...)
 		fmt.Println("limitPerm", currentPerm)
 	}
 
