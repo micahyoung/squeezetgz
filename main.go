@@ -18,11 +18,22 @@ type tarEntry struct {
 	content []byte
 }
 
+type job struct {
+	perm []int
+}
+
+type result struct {
+	perm              []int
+	compressionFactor int64
+	cached            bool
+}
+
 var (
 	// flags
-	verbose         = flag.Bool("v", false, "verbose output")
+	outFile         = flag.String("o", "", "optional output file")
 	numFiles        = flag.Int("n", 0, "number of files to test in the recompressed tar.gz file")
 	workers         = flag.Int("w", 1, "number of workers to use")
+	jobCache        = map[int64]*result{}
 	rewriteContents [][]byte
 	wg              sync.WaitGroup
 )
@@ -46,70 +57,155 @@ func factorial(n int) int {
 	return n * factorial(n-1)
 }
 
-func recompress(fn string) error {
-	if *verbose {
-		log.Printf("recompressing %s", fn)
+func cacheKey(perm []int) int64 {
+	if len(perm) != 2 {
+		panic("cacheKey only supports 2 element perms")
 	}
 
+	// pack two ints into one int64
+	return int64(perm[0])<<32 + int64(perm[1])
+}
+
+func getNext(origPerm []int, origContent []*tarEntry, jobs chan<- *job, results chan *result) *result {
+	jobCount := 0
+	for i := range origContent {
+		skip := false
+		for _, j := range origPerm {
+			if j == i {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		lastIdx := origPerm[len(origPerm)-1]
+
+		testPerm := []int{lastIdx, i}
+		cachekey := cacheKey(testPerm)
+		// check for cached result
+		if cachedResult, ok := jobCache[cachekey]; ok {
+			go func() {
+				results <- cachedResult
+			}()
+		} else {
+			go func(lastIdx, i int) {
+				jobs <- &job{perm: testPerm}
+			}(lastIdx, i)
+		}
+		jobCount++
+	}
+
+	var bestPairResult *result
+	for i := 0; i < jobCount; i++ {
+		result := <-results
+		if !result.cached {
+			result.cached = true
+			jobCache[cacheKey(result.perm)] = result
+		}
+
+		// fmt.Println("result", result)
+
+		if bestPairResult == nil || compareCompression(bestPairResult, result) {
+			bestPairResult = result
+		}
+	}
+	// fmt.Println("best", bestPairResult)
+
+	return bestPairResult
+}
+
+func recompress(fn string) error {
 	originalContents, err := readOriginal(fn)
 	if err != nil {
 		return err
 	}
 
 	origContentLen := len(originalContents)
-	totalResultsLen := factorial(origContentLen)
+	fmt.Println("rewriting files:", origContentLen)
 
-	jobs := make(chan job, origContentLen)
-	results := make(chan result, totalResultsLen)
+	jobs := make(chan *job)
+	results := make(chan *result)
 
 	for w := 1; w <= *workers; w++ {
 		go worker(w, originalContents, jobs, results)
 	}
 
-	origPerm := []int{}
+	var firstBestResult *result
 	for i := 0; i < origContentLen; i++ {
-		origPerm = append(origPerm, i)
+		result := getNext([]int{i}, originalContents, jobs, results)
+
+		if firstBestResult == nil || compareCompression(firstBestResult, result) {
+			firstBestResult = result
+		}
+	}
+	// fmt.Println("firstPerm", firstBestResult.perm)
+
+	bestPerm := firstBestResult.perm
+	for i := 0; i < origContentLen-2; i++ {
+		result := getNext(bestPerm, originalContents, jobs, results) //TODO: cache previous comparisons
+		bestPerm = append(bestPerm, result.perm[1])
+		// fmt.Println("nextPerm", bestPerm)
 	}
 
-	go func() {
-		currentPerm := make([]int, origContentLen)
-		for i := 0; nextPerm(currentPerm); i++ {
-			perm := getPerm(origPerm, currentPerm)
-			fmt.Println(perm)
+	// write recompressed file
+	compressionFactor, compressedBytes := rewritePermToBuffer(bestPerm, originalContents)
+	fmt.Println("compressionFactor", compressionFactor)
 
-			jobs <- job{i, perm}
+	if *outFile != "" {
+		f, err := os.Create(*outFile)
+		if err != nil {
+			return err
 		}
-		fmt.Println("dones")
-		close(jobs)
-	}()
-
-	var minResult *result
-	for i := 0; i < totalResultsLen-1; i++ {
-		result := <-results
-		if minResult == nil || minResult.size > result.size {
-			minResult = &result
+		defer f.Close()
+		if _, err := f.Write(compressedBytes); err != nil {
+			return err
 		}
-		fmt.Println(i, result)
 	}
-	fmt.Println(minResult)
+
+	// go func() {
+	// 	currentPerm := make([]int, origContentLen)
+	// 	for i := 0; nextPerm(currentPerm); i++ {
+	// 		perm := getPerm(origPerm, currentPerm)
+	// 		fmt.Println(perm)
+
+	// 		jobs <- job{i, perm}
+	// 	}
+	// 	fmt.Println("dones")
+	// 	close(jobs)
+	// }()
+
+	// var minFullResult *result
+	// for i := 0; i < totalResultsLen-1; i++ {
+	// 	result := <-results
+	// 	if minFullResult == nil || minFullResult.compressedSize > result.compressedSize {
+	// 		minFullResult = &result
+	// 	}
+	// 	fmt.Println(i, result)
+	// }
+	// fmt.Println(minFullResult)
 
 	return nil
 }
 
-type job struct {
-	id   int
-	perm []int
+func compareCompression(a, b *result) bool {
+	if a.compressionFactor > b.compressionFactor {
+		return true
+	}
+
+	// stable tiebreaker when factors are equal
+	if a.compressionFactor == b.compressionFactor && a.perm[0] < b.perm[0] && a.perm[1] < b.perm[1] {
+		return true
+	}
+
+	return false
 }
 
-type result struct {
-	perm []int
-	size int64
-}
-
-func worker(id int, originalContents []*tarEntry, jobs <-chan job, results chan<- result) {
+func worker(id int, originalContents []*tarEntry, jobs <-chan *job, results chan<- *result) {
 	for job := range jobs {
-		content := rewritePermToBuffer(job.perm, originalContents)
-		results <- result{job.perm, int64(len(content))}
+		compressionFactor, _ := rewritePermToBuffer(job.perm, originalContents)
+		results <- &result{job.perm, compressionFactor, false}
 	}
 }
 
@@ -152,7 +248,7 @@ func readOriginal(fn string) ([]*tarEntry, error) {
 	return originalContents, nil
 }
 
-func rewritePermToBuffer(perm []int, originalContents []*tarEntry) []byte {
+func rewritePermToBuffer(perm []int, originalContents []*tarEntry) (int64, []byte) {
 	bufferWriter := &bytes.Buffer{}
 
 	gzipWriter, _ := gzip.NewWriterLevel(bufferWriter, gzip.BestCompression)
@@ -160,6 +256,7 @@ func rewritePermToBuffer(perm []int, originalContents []*tarEntry) []byte {
 	tarWriter := tar.NewWriter(gzipWriter)
 	defer tarWriter.Close()
 
+	uncompressedSize := int64(0)
 	for n, i := range perm {
 		if *numFiles > 0 && n >= *numFiles {
 			break
@@ -172,12 +269,15 @@ func rewritePermToBuffer(perm []int, originalContents []*tarEntry) []byte {
 		if _, err := tarWriter.Write(originalContents[i].content); err != nil {
 			log.Fatal(err)
 		}
+
+		uncompressedSize += originalContents[i].header.Size
 	}
 
 	tarWriter.Close()
 	gzipWriter.Close()
 
-	return bufferWriter.Bytes()
+	compressedBytes := bufferWriter.Bytes()
+	return uncompressedSize * 10000 / int64(len(compressedBytes)), compressedBytes
 }
 
 func nextPerm(p []int) bool {
