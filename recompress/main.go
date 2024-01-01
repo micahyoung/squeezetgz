@@ -57,10 +57,14 @@ func cacheKey(perm []int) string {
 	return key
 }
 
-func getNext(origPerm []int, origContent []*internal.TarEntry, batchSize int64, jobs chan<- *job, results chan *result) *result {
+func getNextFile(origPerm []int, origContent []*internal.TarEntry, batchSize int64, jobs chan<- *job, results chan *result) *result {
 	jobCount := 0
 	lastIdx := origPerm[len(origPerm)-1]
 	for i := range origContent {
+		if origContent[i].Header.Typeflag != tar.TypeReg {
+			continue
+		}
+
 		if slices.Contains(origPerm, i) {
 			continue
 		}
@@ -116,6 +120,7 @@ func getNext(origPerm []int, origContent []*internal.TarEntry, batchSize int64, 
 			jobCount++
 		}
 	}
+	fmt.Printf("jobs %d\n", jobCount)
 
 	var bestBatchResult *result
 	for i := 0; i < jobCount; i++ {
@@ -228,22 +233,30 @@ func bruteforce(origContentLen int, jobs chan *job, results chan *result) []int 
 func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs chan *job, results chan *result) []int {
 	currentPerm := []int{}
 
+	// add directories first, in original order
 	for i, tarEntry := range originalContents {
-
 		if tarEntry.Header.Typeflag == tar.TypeDir {
 			currentPerm = append(currentPerm, i)
 		}
 	}
 	fmt.Println("dirPerm", currentPerm)
 
+	// add regular files based on compression factor
 	for {
-		result := getNext(currentPerm, originalContents, *batchSize, jobs, results)
+		result := getNextFile(currentPerm, originalContents, *batchSize, jobs, results)
 		if result == nil {
 			break
 		}
 
 		currentPerm = append(currentPerm, result.perm[1:]...)
 		fmt.Println("limitPerm", currentPerm)
+	}
+
+	// add remaining files last (symlinks need target to be added first)
+	for i, tarEntry := range originalContents {
+		if tarEntry.Header.Typeflag != tar.TypeDir && tarEntry.Header.Typeflag != tar.TypeReg {
+			currentPerm = append(currentPerm, i)
+		}
 	}
 
 	return currentPerm
