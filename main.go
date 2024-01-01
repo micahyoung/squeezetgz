@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sync"
 )
 
@@ -69,14 +70,7 @@ func cacheKey(perm []int) int64 {
 func getNext(origPerm []int, origContent []*tarEntry, jobs chan<- *job, results chan *result) *result {
 	jobCount := 0
 	for i := range origContent {
-		skip := false
-		for _, j := range origPerm {
-			if j == i {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if slices.Contains(origPerm, i) {
 			continue
 		}
 
@@ -107,11 +101,11 @@ func getNext(origPerm []int, origContent []*tarEntry, jobs chan<- *job, results 
 
 		// fmt.Println("result", result)
 
-		if bestPairResult == nil || compareCompression(bestPairResult, result) {
+		if bestPairResult == nil || compareCompression(result, bestPairResult) {
 			bestPairResult = result
 		}
 	}
-	// fmt.Println("best", bestPairResult)
+	fmt.Println("best", bestPairResult)
 
 	return bestPairResult
 }
@@ -132,25 +126,40 @@ func recompress(fn string) error {
 		go worker(w, originalContents, jobs, results)
 	}
 
+	// loop through contents for directory entries and add them to the beginning of the perm
+	currentPerm := []int{}
+	for i, tarEntry := range originalContents {
+		if tarEntry.header.Typeflag == tar.TypeDir {
+			currentPerm = append(currentPerm, i)
+		}
+	}
+	fmt.Println("dirPerm", currentPerm)
+
 	var firstBestResult *result
 	for i := 0; i < origContentLen; i++ {
-		result := getNext([]int{i}, originalContents, jobs, results)
+		if slices.Contains(currentPerm, i) {
+			fmt.Println("skipping", i)
+			continue
+		}
 
-		if firstBestResult == nil || compareCompression(firstBestResult, result) {
+		result := getNext(append(currentPerm, i), originalContents, jobs, results)
+
+		if firstBestResult == nil || compareCompression(result, firstBestResult) {
 			firstBestResult = result
 		}
 	}
-	// fmt.Println("firstPerm", firstBestResult.perm)
+	fmt.Println("firstBEstPerm", firstBestResult.perm)
+	currentPerm = append(currentPerm, firstBestResult.perm...)
+	fmt.Println("firstPerm", currentPerm)
 
-	bestPerm := firstBestResult.perm
-	for i := 0; i < origContentLen-2; i++ {
-		result := getNext(bestPerm, originalContents, jobs, results) //TODO: cache previous comparisons
-		bestPerm = append(bestPerm, result.perm[1])
-		// fmt.Println("nextPerm", bestPerm)
+	for i := 0; i < origContentLen-len(currentPerm); i++ {
+		result := getNext(currentPerm, originalContents, jobs, results) //TODO: cache previous comparisons
+		currentPerm = append(currentPerm, result.perm[1])
+		fmt.Println("nextPerm", currentPerm)
 	}
 
 	// write recompressed file
-	compressionFactor, compressedBytes := rewritePermToBuffer(bestPerm, originalContents)
+	compressionFactor, compressedBytes := rewritePermToBuffer(currentPerm, originalContents)
 	fmt.Println("compressionFactor", compressionFactor)
 
 	if *outFile != "" {
