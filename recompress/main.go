@@ -11,10 +11,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"maxtgz/internal"
 	"os"
 	"runtime"
 	"slices"
+	"squeezetgz/internal"
 )
 
 type job struct {
@@ -232,7 +232,7 @@ func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs c
 		currentPerm = append(currentPerm, result.perm[1])
 		fmt.Println("limitPerm", currentPerm)
 	}
-	
+
 	return currentPerm
 }
 

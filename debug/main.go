@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"maxtgz/internal"
+	"squeezetgz/internal"
 )
 
 // scans a tar.gz and prints the compression ratio for each file
