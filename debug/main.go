@@ -26,6 +26,18 @@ func debug(fn string) error {
 		return err
 	}
 
-	fmt.Printf("original contents: %d\n", len(originalContents))
+	totalFactor := int64(0)
+	for i := 0; i < len(originalContents)-1; i++ {
+		testPerm := []int{i, i + 1}
+		compressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents)
+		fmt.Printf("%d :\n", compressionFactor)
+		for _, j := range testPerm {
+			fmt.Printf("  %s\n", originalContents[j].Header.Name)
+		}
+
+		totalFactor += compressionFactor
+	}
+	fmt.Printf("total: %d\n", totalFactor)
+
 	return nil
 }
