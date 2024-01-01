@@ -32,8 +32,7 @@ var (
 	outFile   = flag.String("o", "", "optional output file")
 	mode      = flag.Int("m", 0, "mode (0: default, 1: brute force)")
 	workers   = flag.Int("w", runtime.NumCPU()-1, "number of workers to use. Default: num CPUs - 1")
-	batchSize = flag.Int64("b", 32000, "total size of uncompressed files to evaluate")
-	jobCache  = map[string]*result{}
+	largeSize = flag.Int64("l", 1000000, "file size of large uncompressed files to ignore add append last")
 )
 
 func main() {
@@ -48,90 +47,32 @@ func main() {
 	}
 }
 
-func cacheKey(perm []int) string {
-	// pack two ints into one int64
-	key := ""
-	for _, i := range perm {
-		key += fmt.Sprintf("%d-", i)
-	}
-	return key
-}
-
-func getNextFile(origPerm []int, origContent []*internal.TarEntry, batchSize int64, jobs chan<- *job, results chan *result) *result {
+func getNextFile(origPerm []int, origContent []*internal.TarEntry, largeSize int64, jobs chan<- *job, results chan *result) *result {
 	jobCount := 0
 	lastIdx := origPerm[len(origPerm)-1]
 	for i := range origContent {
+		if origContent[i].Header.Size > largeSize {
+			continue
+		}
 		if origContent[i].Header.Typeflag != tar.TypeReg {
 			continue
 		}
-
 		if slices.Contains(origPerm, i) {
 			continue
 		}
 
-		testPerm := origPerm
+		comboPerm := []int{lastIdx, i}
 
-		// if filesize is large, add directly to perm
-		if origContent[i].Header.Size >= batchSize {
-			comboPerm := []int{lastIdx, i}
-
-			cachekey := cacheKey(comboPerm)
-
-			// check for cached result
-			if cachedResult, ok := jobCache[cachekey]; ok {
-				go func() {
-					results <- cachedResult
-				}()
-			} else {
-				go func(comboPerm []int) {
-					jobs <- &job{perm: comboPerm}
-				}(comboPerm)
-			}
-
-			jobCount++
-
-			continue
-		}
-
-		testPerm = append(testPerm, i)
-		// fmt.Printf("testPerm %v\n", testPerm)
-
-		// otherwise, compare with next files
-		for j := range origContent {
-			if slices.Contains(testPerm, j) {
-				continue
-			}
-
-			comboPerm := []int{lastIdx, i, j}
-
-			cachekey := cacheKey(comboPerm)
-
-			// check for cached result
-			if cachedResult, ok := jobCache[cachekey]; ok {
-				go func() {
-					results <- cachedResult
-				}()
-			} else {
-				go func(comboPerm []int) {
-					jobs <- &job{perm: comboPerm}
-				}(comboPerm)
-			}
-
-			jobCount++
-		}
+		go func(comboPerm []int) {
+			jobs <- &job{perm: comboPerm}
+		}(comboPerm)
+		jobCount++
 	}
 	fmt.Printf("jobs %d\n", jobCount)
 
 	var bestBatchResult *result
 	for i := 0; i < jobCount; i++ {
 		result := <-results
-		if !result.cached {
-			result.cached = true
-			key := cacheKey(result.perm)
-
-			jobCache[key] = result
-		}
-
 		// fmt.Println("result", result)
 
 		if bestBatchResult == nil || compareCompression(result, bestBatchResult) {
@@ -176,8 +117,12 @@ func recompress(fn string) error {
 		bestPerm = bruteforce(origContentLen, jobs, results)
 	}
 
+	if len(bestPerm) != origContentLen {
+		log.Fatal("perm length does not match original contents length")
+	}
+
 	// write recompressed file
-	compressionFactor, compressedBytes := internal.RewritePermToBuffer(bestPerm, originalContents)
+	compressionFactor, compressedBytes := internal.RewritePermToBuffer(bestPerm, originalContents, map[string]int64{}, map[string]int64{})
 	fmt.Println("compressionFactor", compressionFactor)
 
 	if *outFile != "" {
@@ -243,7 +188,7 @@ func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs c
 
 	// add regular files based on compression factor
 	for {
-		result := getNextFile(currentPerm, originalContents, *batchSize, jobs, results)
+		result := getNextFile(currentPerm, originalContents, *largeSize, jobs, results)
 		if result == nil {
 			break
 		}
@@ -252,11 +197,13 @@ func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs c
 		fmt.Println("limitPerm", currentPerm)
 	}
 
-	// add remaining files last (symlinks need target to be added first)
-	for i, tarEntry := range originalContents {
-		if tarEntry.Header.Typeflag != tar.TypeDir && tarEntry.Header.Typeflag != tar.TypeReg {
-			currentPerm = append(currentPerm, i)
+	// add remaining files last (symlinks, large-files, etc)
+	for i := range originalContents {
+		if slices.Contains(currentPerm, i) {
+			continue
 		}
+
+		currentPerm = append(currentPerm, i)
 	}
 
 	return currentPerm
@@ -276,8 +223,10 @@ func compareCompression(a, b *result) bool {
 }
 
 func worker(id int, originalContents []*internal.TarEntry, jobs <-chan *job, results chan<- *result) {
+	jointCache := map[string]int64{}
+	soloCache := map[string]int64{}
 	for job := range jobs {
-		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents)
+		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents, jointCache, soloCache)
 		results <- &result{job.perm, compressionFactor, false}
 	}
 }

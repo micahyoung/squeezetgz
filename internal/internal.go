@@ -4,9 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"log"
 	"os"
+	"strconv"
 )
 
 type TarEntry struct {
@@ -14,13 +16,27 @@ type TarEntry struct {
 	Content []byte
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry) (int64, []byte) {
+func cacheKey(perm []int) string {
+	// pack two ints into one int64
+	key := ""
+	for _, i := range perm {
+		key += fmt.Sprintf("%d-", i)
+	}
+	return key
+}
+
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, soloCache map[string]int64) (int64, []byte) {
+	jointCacheKey := cacheKey(perm)
+	if cacheSize, ok := jointCache[jointCacheKey]; ok {
+		fmt.Println("joint cache hit", perm)
+		return cacheSize, nil
+	}
+
 	jointBufferWriter := &bytes.Buffer{}
 	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
 	jointGzipWriter, _ := gzip.NewWriterLevel(jointCountingCompressedWriter, gzip.BestCompression)
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
-	totalUncompressedSize := int64(0)
 	totalSoloCompressedSize := int64(0)
 	for _, i := range perm {
 		if err := jointTarWriter.WriteHeader(originalContents[i].Header); err != nil {
@@ -29,6 +45,15 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry) (int64, []byt
 
 		if _, err := jointTarWriter.Write(originalContents[i].Content); err != nil {
 			log.Fatal(err)
+		}
+
+		soloCacheKey := strconv.Itoa(i)
+		if cacheSize, ok := soloCache[soloCacheKey]; ok {
+			// fmt.Println("solo cache hit", i)
+
+			totalSoloCompressedSize += cacheSize
+
+			continue
 		}
 
 		soloBufferWriter := &bytes.Buffer{}
@@ -48,15 +73,16 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry) (int64, []byt
 		soloTarWriter.Close()
 		soloGzipWriter.Close()
 
-		totalSoloCompressedSize += int64(soloCountingCompressedWriter.BytesWritten)
-		totalUncompressedSize += int64(soloCountingUncompressedWriter.BytesWritten)
+		soloCompressedSize := int64(soloCountingCompressedWriter.BytesWritten)
+		totalSoloCompressedSize += soloCompressedSize
+		soloCache[soloCacheKey] = soloCompressedSize
 	}
 
 	jointTarWriter.Close()
 	jointGzipWriter.Close()
 
 	totalJointCompressedSize := int64(jointCountingCompressedWriter.BytesWritten)
-
+	jointCache[jointCacheKey] = totalJointCompressedSize
 	return totalSoloCompressedSize - totalJointCompressedSize, jointBufferWriter.Bytes()
 }
 
