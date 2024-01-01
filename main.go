@@ -6,6 +6,7 @@ package main
 // adjust compression ratio to favor header similarity
 // adjust GetNext to search within binariers before next directory/symlink
 // adjust GetNext to try permutations up to a buffer size
+// record each files individual compression ratio and compare with combined ration
 
 import (
 	"archive/tar"
@@ -38,7 +39,7 @@ type result struct {
 var (
 	// flags
 	outFile         = flag.String("o", "", "optional output file")
-	numFiles        = flag.Int("n", 0, "number of files to test in the recompressed tar.gz file")
+	mode            = flag.Int("m", 0, "mode (0: default, 1: brute force)")
 	workers         = flag.Int("w", 1, "number of workers to use")
 	jobCache        = map[int64]*result{}
 	rewriteContents [][]byte
@@ -136,45 +137,83 @@ func recompress(fn string) error {
 		go worker(w, originalContents, jobs, results)
 	}
 
-	// loop through contents for directory entries and add them to the beginning of the perm
-	currentPerm := []int{}
-	for i, tarEntry := range originalContents {
-		if tarEntry.header.Typeflag == tar.TypeDir {
-			currentPerm = append(currentPerm, i)
+	var currentPerm []int
+	switch *mode {
+	case 0:
+		currentPerm = []int{}
+		// loop through contents for directory entries and add them to the beginning of the perm
+		for i, tarEntry := range originalContents {
+			if tarEntry.header.Typeflag == tar.TypeDir {
+				currentPerm = append(currentPerm, i)
+			}
 		}
-	}
-	fmt.Println("dirPerm", currentPerm)
+		fmt.Println("dirPerm", currentPerm)
 
-	var firstBestResult *result
-	for i := 0; i < origContentLen; i++ {
-		if slices.Contains(currentPerm, i) {
-			fmt.Println("skipping", i)
-			continue
+		var firstBestResult *result
+		for i := 0; i < origContentLen; i++ {
+			if slices.Contains(currentPerm, i) {
+				fmt.Println("skipping", i)
+				continue
+			}
+
+			// windowsize := int64(32000)
+			// if originalContents[i].header.Size > windowsize {
+			// 	fmt.Println("skipping", i)
+			// 	continue
+			// }
+
+			result := getNext(append(currentPerm, i), originalContents, 0, jobs, results)
+
+			if firstBestResult == nil || compareCompression(result, firstBestResult) {
+				firstBestResult = result
+			}
+		}
+		fmt.Println("firstBEstPerm", firstBestResult.perm)
+		currentPerm = append(currentPerm, firstBestResult.perm...)
+		fmt.Println("firstPerm", currentPerm)
+
+		for {
+			result := getNext(currentPerm, originalContents, 0, jobs, results)
+			if result == nil {
+				break
+			}
+			currentPerm = append(currentPerm, result.perm[1])
+			fmt.Println("nextPerm", currentPerm)
+		}
+	case 1:
+		statePerm := make([]int, origContentLen)
+		origPerm := make([]int, origContentLen)
+		for i := 0; i < origContentLen; i++ {
+			origPerm[i] = i
 		}
 
-		windowsize := int64(32000)
-		if originalContents[i].header.Size > windowsize {
-			fmt.Println("skipping", i)
-			continue
+		jobCount := 0
+		for {
+			if !nextPerm(statePerm) {
+				fmt.Println("jobs", jobCount)
+				// close(jobs)
+				break
+			}
+
+			perm := getPerm(origPerm, statePerm)
+
+			go func() {
+				jobs <- &job{perm}
+			}()
+
+			jobCount++
 		}
 
-		result := getNext(append(currentPerm, i), originalContents, windowsize, jobs, results)
-
-		if firstBestResult == nil || compareCompression(result, firstBestResult) {
-			firstBestResult = result
+		var minFullResult *result
+		for i := 0; i < jobCount; i++ {
+			result := <-results
+			if minFullResult == nil || compareCompression(result, minFullResult) {
+				minFullResult = result
+			}
+			fmt.Println(i, result)
 		}
-	}
-	fmt.Println("firstBEstPerm", firstBestResult.perm)
-	currentPerm = append(currentPerm, firstBestResult.perm...)
-	fmt.Println("firstPerm", currentPerm)
-
-	for {
-		result := getNext(currentPerm, originalContents, 0, jobs, results)
-		if result == nil {
-			break
-		}
-		currentPerm = append(currentPerm, result.perm[1])
-		fmt.Println("nextPerm", currentPerm)
+		fmt.Println(minFullResult)
+		currentPerm = minFullResult.perm
 	}
 
 	// write recompressed file
@@ -191,29 +230,6 @@ func recompress(fn string) error {
 			return err
 		}
 	}
-
-	// go func() {
-	// 	currentPerm := make([]int, origContentLen)
-	// 	for i := 0; nextPerm(currentPerm); i++ {
-	// 		perm := getPerm(origPerm, currentPerm)
-	// 		fmt.Println(perm)
-
-	// 		jobs <- job{i, perm}
-	// 	}
-	// 	fmt.Println("dones")
-	// 	close(jobs)
-	// }()
-
-	// var minFullResult *result
-	// for i := 0; i < totalResultsLen-1; i++ {
-	// 	result := <-results
-	// 	if minFullResult == nil || minFullResult.compressedSize > result.compressedSize {
-	// 		minFullResult = &result
-	// 	}
-	// 	fmt.Println(i, result)
-	// }
-	// fmt.Println(minFullResult)
-
 	return nil
 }
 
@@ -277,35 +293,66 @@ func readOriginal(fn string) ([]*tarEntry, error) {
 }
 
 func rewritePermToBuffer(perm []int, originalContents []*tarEntry) (int64, []byte) {
-	bufferWriter := &bytes.Buffer{}
+	jointBufferWriter := &bytes.Buffer{}
+	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
+	jointGzipWriter, _ := gzip.NewWriterLevel(jointCountingCompressedWriter, gzip.BestCompression)
+	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
-	gzipWriter, _ := gzip.NewWriterLevel(bufferWriter, gzip.BestCompression)
-	defer gzipWriter.Close()
-	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
-
-	uncompressedSize := int64(0)
-	for n, i := range perm {
-		if *numFiles > 0 && n >= *numFiles {
-			break
-		}
-
-		if err := tarWriter.WriteHeader(originalContents[i].header); err != nil {
+	totalUncompressedSize := int64(0)
+	totalSoloCompressedSize := int64(0)
+	for _, i := range perm {
+		if err := jointTarWriter.WriteHeader(originalContents[i].header); err != nil {
 			log.Fatal(err)
 		}
 
-		if _, err := tarWriter.Write(originalContents[i].content); err != nil {
+		if _, err := jointTarWriter.Write(originalContents[i].content); err != nil {
 			log.Fatal(err)
 		}
 
-		uncompressedSize += originalContents[i].header.Size
+		soloBufferWriter := &bytes.Buffer{}
+		soloCountingCompressedWriter := &CountingWriter{writer: soloBufferWriter}
+		soloGzipWriter, _ := gzip.NewWriterLevel(soloCountingCompressedWriter, gzip.BestCompression)
+		soloCountingUncompressedWriter := &CountingWriter{writer: soloGzipWriter}
+		soloTarWriter := tar.NewWriter(soloCountingUncompressedWriter)
+
+		if err := soloTarWriter.WriteHeader(originalContents[i].header); err != nil {
+			log.Fatal(err)
+		}
+
+		if _, err := soloTarWriter.Write(originalContents[i].content); err != nil {
+			log.Fatal(err)
+		}
+
+		soloTarWriter.Close()
+		soloGzipWriter.Close()
+
+		totalSoloCompressedSize += int64(soloCountingCompressedWriter.BytesWritten)
+		totalUncompressedSize += int64(soloCountingUncompressedWriter.BytesWritten)
 	}
 
-	tarWriter.Close()
-	gzipWriter.Close()
+	jointTarWriter.Close()
+	jointGzipWriter.Close()
 
-	compressedBytes := bufferWriter.Bytes()
-	return uncompressedSize * 10000 / int64(len(compressedBytes)), compressedBytes
+	totalJointCompressedSize := int64(jointCountingCompressedWriter.BytesWritten)
+
+	// soloCompressionFactor := (totalSoloCompressedSize * 100000) / totalUncompressedSize
+	// jointCompressionFactor := (totalJointCompressedSize * 100000) / totalUncompressedSize
+
+	// fmt.Printf("size: solo: %d, joint: %d, uncompressed: %d\n", totalSoloCompressedSize, totalJointCompressedSize, totalUncompressedSize)
+	// fmt.Printf("factor: solo: %d, joint: %d\n", soloCompressionFactor, jointCompressionFactor)
+	return totalSoloCompressedSize - totalJointCompressedSize, jointBufferWriter.Bytes()
+	// return soloCompressionFactor - jointCompressionFactor, jointBufferWriter.Bytes()
+}
+
+type CountingWriter struct {
+	writer       io.Writer
+	BytesWritten int
+}
+
+func (w *CountingWriter) Write(p []byte) (n int, err error) {
+	n, err = w.writer.Write(p)
+	w.BytesWritten += n
+	return n, err
 }
 
 func nextPerm(p []int) bool {
