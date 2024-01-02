@@ -3,12 +3,13 @@ package internal
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"strconv"
+
+	"github.com/klauspost/pgzip"
 )
 
 type TarEntry struct {
@@ -34,7 +35,11 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 
 	jointBufferWriter := &bytes.Buffer{}
 	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
-	jointGzipWriter, _ := gzip.NewWriterLevel(jointCountingCompressedWriter, gzip.BestCompression)
+	jointGzipWriter, _ := pgzip.NewWriterLevel(jointCountingCompressedWriter, pgzip.BestCompression)
+	jointGzipWriter.SetConcurrency(2048, 4)
+	soloGzipWriter, _ := pgzip.NewWriterLevel(&bytes.Buffer{}, pgzip.BestCompression)
+	soloGzipWriter.SetConcurrency(2048, 4)
+
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
 	totalSoloCompressedSize := int64(0)
@@ -56,11 +61,9 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 			continue
 		}
 
-		soloBufferWriter := &bytes.Buffer{}
-		soloCountingCompressedWriter := &CountingWriter{writer: soloBufferWriter}
-		soloGzipWriter, _ := gzip.NewWriterLevel(soloCountingCompressedWriter, gzip.BestCompression)
-		soloCountingUncompressedWriter := &CountingWriter{writer: soloGzipWriter}
-		soloTarWriter := tar.NewWriter(soloCountingUncompressedWriter)
+		soloCountingCompressedWriter := &CountingWriter{writer: soloGzipWriter}
+		soloGzipWriter.Reset(soloCountingCompressedWriter)
+		soloTarWriter := tar.NewWriter(soloCountingCompressedWriter)
 
 		if err := soloTarWriter.WriteHeader(originalContents[i].Header); err != nil {
 			log.Fatal(err)
@@ -103,7 +106,7 @@ func ReadOriginal(fn string) ([]*TarEntry, error) {
 		return nil, err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	gz, err := pgzip.NewReader(f)
 	if err != nil {
 		return nil, err
 	}
