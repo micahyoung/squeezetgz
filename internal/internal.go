@@ -12,6 +12,10 @@ import (
 	"github.com/klauspost/pgzip"
 )
 
+var (
+	blockSize = 23000
+)
+
 type TarEntry struct {
 	Header  *tar.Header
 	Content []byte
@@ -36,9 +40,9 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 	jointBufferWriter := &bytes.Buffer{}
 	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
 	jointGzipWriter, _ := pgzip.NewWriterLevel(jointCountingCompressedWriter, pgzip.BestCompression)
-	jointGzipWriter.SetConcurrency(2048, 4)
+	jointGzipWriter.SetConcurrency(blockSize, 4)
 	soloGzipWriter, _ := pgzip.NewWriterLevel(&bytes.Buffer{}, pgzip.BestCompression) // writer will be reset
-	soloGzipWriter.SetConcurrency(2048, 4)
+	soloGzipWriter.SetConcurrency(blockSize, 4)
 
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
@@ -85,9 +89,10 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 	jointGzipWriter.Close()
 
 	totalJointCompressedSize := int64(jointCountingCompressedWriter.BytesWritten)
-	totalCompressonFactor := totalSoloCompressedSize - totalJointCompressedSize
-	jointCache[jointCacheKey] = totalCompressonFactor
-	return totalCompressonFactor, jointBufferWriter.Bytes()
+	totalCompressionDiff := totalSoloCompressedSize - totalJointCompressedSize
+
+	jointCache[jointCacheKey] = totalCompressionDiff
+	return totalCompressionDiff, jointBufferWriter.Bytes()
 }
 
 type CountingWriter struct {
