@@ -28,16 +28,16 @@ func cacheKey(perm []int) string {
 
 func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, soloCache map[string]int64) (int64, []byte) {
 	jointCacheKey := cacheKey(perm)
-	if cacheSize, ok := jointCache[jointCacheKey]; ok {
+	if cacheCompressionFactor, ok := jointCache[jointCacheKey]; ok {
 		fmt.Println("joint cache hit", perm)
-		return cacheSize, nil
+		return cacheCompressionFactor, nil
 	}
 
 	jointBufferWriter := &bytes.Buffer{}
 	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
 	jointGzipWriter, _ := pgzip.NewWriterLevel(jointCountingCompressedWriter, pgzip.BestCompression)
 	jointGzipWriter.SetConcurrency(2048, 4)
-	soloGzipWriter, _ := pgzip.NewWriterLevel(&bytes.Buffer{}, pgzip.BestCompression)
+	soloGzipWriter, _ := pgzip.NewWriterLevel(&bytes.Buffer{}, pgzip.BestCompression) // writer will be reset
 	soloGzipWriter.SetConcurrency(2048, 4)
 
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
@@ -85,8 +85,9 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 	jointGzipWriter.Close()
 
 	totalJointCompressedSize := int64(jointCountingCompressedWriter.BytesWritten)
-	jointCache[jointCacheKey] = totalJointCompressedSize
-	return totalSoloCompressedSize - totalJointCompressedSize, jointBufferWriter.Bytes()
+	totalCompressonFactor := totalSoloCompressedSize - totalJointCompressedSize
+	jointCache[jointCacheKey] = totalCompressonFactor
+	return totalCompressonFactor, jointBufferWriter.Bytes()
 }
 
 type CountingWriter struct {
