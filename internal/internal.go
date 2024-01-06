@@ -13,8 +13,15 @@ import (
 )
 
 var (
-	blockSize = 23000
+	// blockSize = 64000
+	BlockSizeStr = "44000"
+	blockSize, _ = strconv.Atoi(BlockSizeStr)
 )
+
+// func init() {
+// 	fmt.Println("blockSize", 1 << 20)
+// 	os.Exit(1)
+// }
 
 type TarEntry struct {
 	Header  *tar.Header
@@ -30,29 +37,47 @@ func cacheKey(perm []int) string {
 	return key
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, soloCache map[string]int64) (int64, []byte) {
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool, jointCache, soloCache map[string]int64) (int64, []byte) {
 	jointCacheKey := cacheKey(perm)
 	if cacheCompressionFactor, ok := jointCache[jointCacheKey]; ok {
 		fmt.Println("joint cache hit", perm)
 		return cacheCompressionFactor, nil
 	}
 
-	jointBufferWriter := &bytes.Buffer{}
+	outputBufferWriter := &bytes.Buffer{}
+	var jointBufferWriter io.Writer = outputBufferWriter
+	if partial {
+		jointBufferWriter = io.Discard
+	}
 	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
 	jointGzipWriter, _ := pgzip.NewWriterLevel(jointCountingCompressedWriter, pgzip.BestCompression)
-	jointGzipWriter.SetConcurrency(blockSize, 4)
-	soloGzipWriter, _ := pgzip.NewWriterLevel(&bytes.Buffer{}, pgzip.BestCompression) // writer will be reset
-	soloGzipWriter.SetConcurrency(blockSize, 4)
+	jointGzipWriter.SetConcurrency(blockSize, 1)
+	soloGzipWriter, _ := pgzip.NewWriterLevel(io.Discard, pgzip.BestCompression) // writer will be reset
+	soloGzipWriter.SetConcurrency(blockSize, 1)
 
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
 	totalSoloCompressedSize := int64(0)
 	for _, i := range perm {
-		if err := jointTarWriter.WriteHeader(originalContents[i].Header); err != nil {
+		var content []byte
+		var header *tar.Header
+		// if content is larger than 2 x blockSize, copy only the first and last blockSize bytes
+		// creat a new header with the new size
+		if partial && len(originalContents[i].Content) >= blockSize*2 {
+			content = append(originalContents[i].Content[:blockSize], originalContents[i].Content[len(originalContents[i].Content)-blockSize:]...)
+			headerStruct := *originalContents[i].Header
+			header = &headerStruct
+			header.Size = int64(len(content))
+		} else {
+			content = originalContents[i].Content
+			header = originalContents[i].Header
+		}
+
+		if err := jointTarWriter.WriteHeader(header); err != nil {
 			log.Fatal(err)
 		}
 
-		if _, err := jointTarWriter.Write(originalContents[i].Content); err != nil {
+		if _, err := jointTarWriter.Write(content); err != nil {
 			log.Fatal(err)
 		}
 
@@ -65,15 +90,15 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 			continue
 		}
 
-		soloCountingCompressedWriter := &CountingWriter{writer: soloGzipWriter}
+		soloCountingCompressedWriter := &CountingWriter{writer: io.Discard}
 		soloGzipWriter.Reset(soloCountingCompressedWriter)
 		soloTarWriter := tar.NewWriter(soloCountingCompressedWriter)
 
-		if err := soloTarWriter.WriteHeader(originalContents[i].Header); err != nil {
+		if err := soloTarWriter.WriteHeader(header); err != nil {
 			log.Fatal(err)
 		}
 
-		if _, err := soloTarWriter.Write(originalContents[i].Content); err != nil {
+		if _, err := soloTarWriter.Write(content); err != nil {
 			log.Fatal(err)
 		}
 
@@ -92,7 +117,7 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, jointCache, s
 	totalCompressionDiff := totalSoloCompressedSize - totalJointCompressedSize
 
 	jointCache[jointCacheKey] = totalCompressionDiff
-	return totalCompressionDiff, jointBufferWriter.Bytes()
+	return totalCompressionDiff, outputBufferWriter.Bytes()
 }
 
 type CountingWriter struct {

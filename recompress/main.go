@@ -122,7 +122,7 @@ func recompress(fn string) error {
 	}
 
 	// write recompressed file
-	compressionFactor, compressedBytes := internal.RewritePermToBuffer(bestPerm, originalContents, map[string]int64{}, map[string]int64{})
+	compressionFactor, compressedBytes := internal.RewritePermToBuffer(bestPerm, originalContents, false, map[string]int64{}, map[string]int64{})
 	fmt.Println("compressionFactor", compressionFactor)
 
 	if *outFile != "" {
@@ -226,7 +226,7 @@ func worker(id int, originalContents []*internal.TarEntry, jobs <-chan *job, res
 	jointCache := map[string]int64{}
 	soloCache := map[string]int64{}
 	for job := range jobs {
-		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents, jointCache, soloCache)
+		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents, true, jointCache, soloCache)
 		results <- &result{job.perm, compressionFactor, false}
 	}
 }

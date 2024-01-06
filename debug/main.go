@@ -29,7 +29,7 @@ func debug(fn string) error {
 	totalFactor := int64(0)
 	for i := 0; i < len(originalContents)-1; i++ {
 		testPerm := []int{i, i + 1}
-		compressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, map[string]int64{}, map[string]int64{})
+		compressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, false, map[string]int64{}, map[string]int64{})
 		fmt.Printf("%d :\n", compressionFactor)
 		for _, j := range testPerm {
 			fmt.Printf("  %s\n", originalContents[j].Header.Name)
