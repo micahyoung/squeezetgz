@@ -29,10 +29,9 @@ type result struct {
 
 var (
 	// flags
-	outFile   = flag.String("o", "", "optional output file")
-	mode      = flag.Int("m", 0, "mode (0: default, 1: brute force)")
-	workers   = flag.Int("w", runtime.NumCPU()-1, "number of workers to use. Default: num CPUs - 1")
-	largeSize = flag.Int64("l", 1000000, "file size of large uncompressed files to ignore add append last")
+	outFile = flag.String("o", "", "optional output file")
+	mode    = flag.Int("m", 0, "mode (0: default, 1: brute force)")
+	workers = flag.Int("w", runtime.NumCPU()-1, "number of workers to use. Default: num CPUs - 1")
 )
 
 func main() {
@@ -47,13 +46,10 @@ func main() {
 	}
 }
 
-func getNextFile(origPerm []int, origContent []*internal.TarEntry, largeSize int64, jobs chan<- *job, results chan *result) *result {
+func getNextFile(origPerm []int, origContent []*internal.TarEntry, jobs chan<- *job, results chan *result) *result {
 	jobCount := 0
 	lastIdx := origPerm[len(origPerm)-1]
 	for i := range origContent {
-		if origContent[i].Header.Size > largeSize {
-			continue
-		}
 		if origContent[i].Header.Typeflag != tar.TypeReg {
 			continue
 		}
@@ -188,7 +184,7 @@ func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs c
 
 	// add regular files based on compression factor
 	for {
-		result := getNextFile(currentPerm, originalContents, *largeSize, jobs, results)
+		result := getNextFile(currentPerm, originalContents, jobs, results)
 		if result == nil {
 			break
 		}
