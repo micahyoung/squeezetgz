@@ -6,7 +6,7 @@ cd "$(dirname "${0}")"
 dict="/usr/share/dict/words"
 dictsize=$(wc -l < ${dict})
 
-for i in {2,4,5,6,10,20,100,1000}; do
+for i in {2,4,5,6,7,8,9,10,20,100,1000}; do
     mkdir -p "${i}"
     
     split -l$((dictsize/i)) -a 3 $dict "${i}/"

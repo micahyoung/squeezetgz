@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"flag"
 	"fmt"
 	"log"
@@ -27,17 +28,45 @@ func debug(fn string) error {
 	}
 
 	totalFactor := int64(0)
-	for i := 0; i < len(originalContents)-1; i++ {
-		testPerm := []int{i, i + 1}
-		compressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, false, map[string]int64{}, map[string]int64{})
-		fmt.Printf("%d :\n", compressionFactor)
-		for _, j := range testPerm {
-			fmt.Printf("  %s\n", originalContents[j].Header.Name)
-		}
+	partialCache, totalCache := map[int]int64{}, map[int]int64{}
+	for i := 1; i < len(originalContents)-2; i++ {
+		testPerm := []int{i - 1, i}
+		partialCompressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, true, partialCache)
+		totalCompressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, false, totalCache)
+		fmt.Printf("  %s (%s) %d:%d\n", originalContents[i].Header.Name, getTypeShort(originalContents[i].Header.Typeflag), partialCompressionFactor, totalCompressionFactor)
 
-		totalFactor += compressionFactor
+		totalFactor += totalCompressionFactor
 	}
 	fmt.Printf("total: %d\n", totalFactor)
 
 	return nil
+}
+
+func getTypeShort(t byte) string {
+	switch t {
+	case tar.TypeReg:
+		return "f"
+	case tar.TypeDir:
+		return "d"
+	case tar.TypeSymlink:
+		return "l"
+	case tar.TypeChar:
+		return "c"
+	case tar.TypeBlock:
+		return "b"
+	case tar.TypeFifo:
+		return "p"
+	case tar.TypeCont:
+		return "c"
+	case tar.TypeXHeader:
+		return "x"
+	case tar.TypeXGlobalHeader:
+		return "x"
+	case tar.TypeGNULongName:
+		return "g"
+	case tar.TypeGNULongLink:
+		return "g"
+	default:
+		return "?"
+	}
 }

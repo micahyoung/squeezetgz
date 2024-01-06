@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sort"
 	"squeezetgz/internal"
 )
 
@@ -24,14 +25,14 @@ type job struct {
 type result struct {
 	perm              []int
 	compressionFactor int64
-	cached            bool
 }
 
 var (
 	// flags
-	outFile = flag.String("o", "", "optional output file")
-	mode    = flag.Int("m", 0, "mode (0: default, 1: brute force)")
-	workers = flag.Int("w", runtime.NumCPU()-1, "number of workers to use. Default: num CPUs - 1")
+	outFile   = flag.String("o", "", "optional output file")
+	mode      = flag.Int("m", 0, "mode (0: default, 1: brute force)")
+	batchSize = flag.Int("b", 1, "batch size")
+	workers   = flag.Int("w", runtime.NumCPU()-1, "number of workers to use. Default: num CPUs - 1")
 )
 
 func main() {
@@ -46,7 +47,7 @@ func main() {
 	}
 }
 
-func getNextFile(origPerm []int, origContent []*internal.TarEntry, jobs chan<- *job, results chan *result) *result {
+func getNextFiles(origPerm []int, origContent []*internal.TarEntry, jobs chan<- *job, results chan *result) []*result {
 	jobCount := 0
 	lastIdx := origPerm[len(origPerm)-1]
 	for i := range origContent {
@@ -66,18 +67,23 @@ func getNextFile(origPerm []int, origContent []*internal.TarEntry, jobs chan<- *
 	}
 	fmt.Printf("jobs %d\n", jobCount)
 
-	var bestBatchResult *result
+	var bestBatchResults []*result
 	for i := 0; i < jobCount; i++ {
 		result := <-results
 		// fmt.Println("result", result)
+		testResults := append(bestBatchResults, result)
+		sort.Slice(testResults, func(i, j int) bool {
+			return compareCompression(testResults[i], testResults[j])
+		})
 
-		if bestBatchResult == nil || compareCompression(result, bestBatchResult) {
-			bestBatchResult = result
+		if len(testResults) <= *batchSize {
+			bestBatchResults = testResults
+			continue
 		}
+		bestBatchResults = testResults[:len(testResults)-1]
 	}
-	fmt.Println("best", bestBatchResult)
 
-	return bestBatchResult
+	return bestBatchResults
 }
 
 func recompress(fn string) error {
@@ -87,7 +93,7 @@ func recompress(fn string) error {
 	}
 
 	origContentLen := len(originalContents)
-	fmt.Println("rewriting files:", origContentLen)
+	fmt.Println("rewriting entries:", origContentLen)
 
 	jobs := make(chan *job)
 	results := make(chan *result)
@@ -99,6 +105,9 @@ func recompress(fn string) error {
 	var bestPerm []int
 	switch *mode {
 	case 0:
+		// close(jobs)
+		bestPerm = bruteforce(originalContents, origContentLen, jobs, results)
+	case 1:
 		// skip large files for both first-best candidates
 		// loop through contents for directory entries and add them to the beginning of the perm
 		// scan for pair of entries with best joint compression factor
@@ -108,9 +117,8 @@ func recompress(fn string) error {
 		// scan all remaining entries that pair with current file for best compression factor
 		// add only new file to perm
 		bestPerm = optimized(originalContents, origContentLen, jobs, results)
-	case 1:
-		// close(jobs)
-		bestPerm = bruteforce(origContentLen, jobs, results)
+	case 2:
+		bestPerm = partitioned(originalContents, origContentLen, jobs, results)
 	}
 
 	if len(bestPerm) != origContentLen {
@@ -118,8 +126,13 @@ func recompress(fn string) error {
 	}
 
 	// write recompressed file
-	compressionFactor, compressedBytes := internal.RewritePermToBuffer(bestPerm, originalContents, false, map[string]int64{}, map[string]int64{})
+
+	compressionFactor, compressedBytes := internal.RewritePermToBuffer(bestPerm, originalContents, false, map[int]int64{})
 	fmt.Println("compressionFactor", compressionFactor)
+
+	if err := internal.Check(compressedBytes, originalContents); err != nil {
+		return err
+	}
 
 	if *outFile != "" {
 		f, err := os.Create(*outFile)
@@ -134,14 +147,27 @@ func recompress(fn string) error {
 	return nil
 }
 
-func bruteforce(origContentLen int, jobs chan *job, results chan *result) []int {
-	statePerm := make([]int, origContentLen)
-	origPerm := make([]int, origContentLen)
-	for i := 0; i < origContentLen; i++ {
-		origPerm[i] = i
+func bruteforce(originalContents []*internal.TarEntry, origContentLen int, jobs chan *job, results chan *result) []int {
+	// add directories first, in original order
+	dirPerm := []int{}
+	for i, tarEntry := range originalContents {
+		if tarEntry.Header.Typeflag == tar.TypeDir {
+			dirPerm = append(dirPerm, i)
+		}
+	}
+	fmt.Println("dirPerm", dirPerm)
+
+	// collect regular files separately
+	filePerm := []int{}
+	for i, tarEntry := range originalContents {
+		if tarEntry.Header.Typeflag == tar.TypeReg {
+			filePerm = append(filePerm, i)
+		}
 	}
 
-	jobCount := 0
+	statePerm := make([]int, len(filePerm))
+
+	jobCount := int64(0)
 	for {
 		if !nextPerm(statePerm) {
 			fmt.Println("jobs", jobCount)
@@ -149,26 +175,79 @@ func bruteforce(origContentLen int, jobs chan *job, results chan *result) []int 
 			break
 		}
 
-		perm := getPerm(origPerm, statePerm)
+		perm := getPerm(filePerm, statePerm)
 
 		go func() {
-			jobs <- &job{perm}
+			jobs <- &job{append(dirPerm, perm...)}
 		}()
 
 		jobCount++
 	}
 
-	var minFullResult *result
-	for i := 0; i < jobCount; i++ {
+	var minAllFilesResult *result
+	for i := int64(0); i < jobCount; i++ {
 		result := <-results
-		if minFullResult == nil || compareCompression(result, minFullResult) {
-			minFullResult = result
+		if minAllFilesResult == nil || compareCompression(result, minAllFilesResult) {
+			minAllFilesResult = result
 		}
-		fmt.Println(i, result)
+
+		// print every 10 percent
+		if i%(jobCount/10) == 0 {
+			fmt.Printf("best @ %2d%%: %v\n", i*101/jobCount, minAllFilesResult)
+		}
 	}
-	fmt.Println(minFullResult)
-	t := minFullResult.perm
-	return t
+	fmt.Println(minAllFilesResult)
+
+	currentPerm := minAllFilesResult.perm
+
+	// add remaining files last (symlinks, etc)
+	for i := range originalContents {
+		if slices.Contains(currentPerm, i) {
+			continue
+		}
+
+		currentPerm = append(currentPerm, i)
+	}
+
+	return currentPerm
+}
+
+func partitioned(originalContents []*internal.TarEntry, origContentLen int, jobs chan *job, results chan *result) []int {
+	currentPerm := []int{}
+
+	// add directories first, in original order
+	for i, tarEntry := range originalContents {
+		if tarEntry.Header.Typeflag == tar.TypeDir {
+			currentPerm = append(currentPerm, i)
+		}
+	}
+	fmt.Println("dirPerm", currentPerm)
+
+	// add regular files based on compression factor
+	for {
+		results := getNextFiles(currentPerm, originalContents, jobs, results)
+		if len(results) == 0 {
+			break
+		}
+		fmt.Println("best", results[0])
+
+		for _, result := range results {
+			currentPerm = append(currentPerm, result.perm[1:]...)
+		}
+
+		fmt.Println("limitPerm", currentPerm)
+	}
+
+	// add remaining files last (symlinks, etc)
+	for i := range originalContents {
+		if slices.Contains(currentPerm, i) {
+			continue
+		}
+
+		currentPerm = append(currentPerm, i)
+	}
+
+	return currentPerm
 }
 
 func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs chan *job, results chan *result) []int {
@@ -184,16 +263,16 @@ func optimized(originalContents []*internal.TarEntry, origContentLen int, jobs c
 
 	// add regular files based on compression factor
 	for {
-		result := getNextFile(currentPerm, originalContents, jobs, results)
-		if result == nil {
+		results := getNextFiles(currentPerm, originalContents, jobs, results)
+		if len(results) == 0 {
 			break
 		}
 
-		currentPerm = append(currentPerm, result.perm[1:]...)
+		currentPerm = append(currentPerm, results[0].perm[1:]...)
 		fmt.Println("limitPerm", currentPerm)
 	}
 
-	// add remaining files last (symlinks, large-files, etc)
+	// add remaining files last (symlinks, etc)
 	for i := range originalContents {
 		if slices.Contains(currentPerm, i) {
 			continue
@@ -219,11 +298,10 @@ func compareCompression(a, b *result) bool {
 }
 
 func worker(id int, originalContents []*internal.TarEntry, jobs <-chan *job, results chan<- *result) {
-	jointCache := map[string]int64{}
-	soloCache := map[string]int64{}
+	soloCache := map[int]int64{}
 	for job := range jobs {
-		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents, true, jointCache, soloCache)
-		results <- &result{job.perm, compressionFactor, false}
+		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents, true, soloCache)
+		results <- &result{job.perm, compressionFactor}
 	}
 }
 

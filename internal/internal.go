@@ -7,19 +7,20 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"strconv"
 
 	"github.com/klauspost/pgzip"
 )
 
 var (
-	// blockSize = 64000
+	// allow override with -ldflags "-X squeezetgz/internal.BlockSizeStr=44000"
 	BlockSizeStr = "44000"
 	blockSize, _ = strconv.Atoi(BlockSizeStr)
 )
 
 // func init() {
-// 	fmt.Println("blockSize", 1 << 20)
+// 	fmt.Println("blockSize", blockSize)
 // 	os.Exit(1)
 // }
 
@@ -28,22 +29,57 @@ type TarEntry struct {
 	Content []byte
 }
 
-func cacheKey(perm []int) string {
-	// pack two ints into one int64
-	key := ""
-	for _, i := range perm {
-		key += fmt.Sprintf("%d-", i)
+func Check(compressedBytes []byte, originalContents []*TarEntry) error {
+	gzipReader, err := pgzip.NewReader(bytes.NewReader(compressedBytes))
+	if err != nil {
+		return err
 	}
-	return key
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+
+	originalContentNameLookup := map[string]int{}
+	for i, originalContent := range originalContents {
+		originalContentNameLookup[originalContent.Header.Name] = i
+	}
+
+	entryCount := 0
+	for {
+		hdr, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		originalEntry := originalContents[originalContentNameLookup[hdr.Name]]
+		if originalEntry == nil {
+			return fmt.Errorf("missing entry: %s", hdr.Name)
+		}
+		if !reflect.DeepEqual(*hdr, *originalEntry.Header) {
+			return fmt.Errorf("header mismatch: %s: %#+v != %#+v", hdr.Name, hdr, originalEntry.Header)
+		}
+
+		content, err := io.ReadAll(tarReader)
+		if err != nil {
+			return err
+		}
+
+		if !reflect.DeepEqual(content, originalEntry.Content) {
+			return fmt.Errorf("content mismatch: %s", hdr.Name)
+		}
+
+		entryCount++
+	}
+
+	if entryCount != len(originalContents) {
+		return fmt.Errorf("entry count mismatch: %d != %d", entryCount, len(originalContents))
+	}
+
+	return nil
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool, jointCache, soloCache map[string]int64) (int64, []byte) {
-	jointCacheKey := cacheKey(perm)
-	if cacheCompressionFactor, ok := jointCache[jointCacheKey]; ok {
-		fmt.Println("joint cache hit", perm)
-		return cacheCompressionFactor, nil
-	}
-
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool, soloCache map[int]int64) (int64, []byte) {
 	outputBufferWriter := &bytes.Buffer{}
 	var jointBufferWriter io.Writer = outputBufferWriter
 	if partial {
@@ -61,10 +97,14 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool,
 	for _, i := range perm {
 		var content []byte
 		var header *tar.Header
-		// if content is larger than 2 x blockSize, copy only the first and last blockSize bytes
-		// creat a new header with the new size
-		if partial && len(originalContents[i].Content) >= blockSize*2 {
+		// if content is larger than 2 x blockSize, and
+
+		if partial && len(originalContents[i].Content) > blockSize {
+			// if over threshold, copy first AND last blockSize-bytes
+			// not clear why this works so well, since it duplicates when content is less than 2xblockSize
 			content = append(originalContents[i].Content[:blockSize], originalContents[i].Content[len(originalContents[i].Content)-blockSize:]...)
+
+			// rewrite header size to new content size
 			headerStruct := *originalContents[i].Header
 			header = &headerStruct
 			header.Size = int64(len(content))
@@ -81,8 +121,7 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool,
 			log.Fatal(err)
 		}
 
-		soloCacheKey := strconv.Itoa(i)
-		if cacheSize, ok := soloCache[soloCacheKey]; ok {
+		if cacheSize, ok := soloCache[i]; ok {
 			// fmt.Println("solo cache hit", i)
 
 			totalSoloCompressedSize += cacheSize
@@ -107,7 +146,7 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool,
 
 		soloCompressedSize := int64(soloCountingCompressedWriter.BytesWritten)
 		totalSoloCompressedSize += soloCompressedSize
-		soloCache[soloCacheKey] = soloCompressedSize
+		soloCache[i] = soloCompressedSize
 	}
 
 	jointTarWriter.Close()
@@ -116,7 +155,6 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool,
 	totalJointCompressedSize := int64(jointCountingCompressedWriter.BytesWritten)
 	totalCompressionDiff := totalSoloCompressedSize - totalJointCompressedSize
 
-	jointCache[jointCacheKey] = totalCompressionDiff
 	return totalCompressionDiff, outputBufferWriter.Bytes()
 }
 
