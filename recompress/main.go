@@ -70,16 +70,27 @@ func getNextFiles(origPerm []int, origContent []*internal.TarEntry, jobs chan<- 
 	var bestBatchResults []*result
 	for i := 0; i < jobCount; i++ {
 		result := <-results
-		// fmt.Println("result", result)
+
+		// skip if best-batch is not empty and new result is worse than lowest result in best-batch
+		if len(bestBatchResults) != 0 && !compareCompression(result, bestBatchResults[len(bestBatchResults)-1]) {
+			continue
+		}
+
+		// add new result to current best
 		testResults := append(bestBatchResults, result)
+
+		// re-sort all by compression factor
 		sort.Slice(testResults, func(i, j int) bool {
 			return compareCompression(testResults[i], testResults[j])
 		})
 
+		// if not yet batchSize, use full test-batch as best-batch
 		if len(testResults) <= *batchSize {
 			bestBatchResults = testResults
 			continue
 		}
+
+		// update best-batch up to batch size, dropping worst result
 		bestBatchResults = testResults[:len(testResults)-1]
 	}
 
