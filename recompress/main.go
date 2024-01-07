@@ -94,6 +94,17 @@ func getNextFiles(origPerm []int, origContent []*internal.TarEntry, jobs chan<- 
 		bestBatchResults = testResults[:len(testResults)-1]
 	}
 
+	// if any best-match result's files were 0, only return single-best result instead of whole batch
+	// this avoids giving batch suggestions from unrepresentative perms
+	if len(bestBatchResults) > 1 {
+		for _, i := range bestBatchResults[0].perm {
+			if origContent[i].Header.Size == 0 {
+				return bestBatchResults[:1]
+			}
+		}
+	}
+
+	// otherwise, return full set of results
 	return bestBatchResults
 }
 
