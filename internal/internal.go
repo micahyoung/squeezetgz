@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/klauspost/pgzip"
+	"github.com/klauspost/compress/gzip"
 )
 
 var (
@@ -30,7 +30,7 @@ type TarEntry struct {
 }
 
 func Check(compressedBytes []byte, originalContents []*TarEntry) error {
-	gzipReader, err := pgzip.NewReader(bytes.NewReader(compressedBytes))
+	gzipReader, err := gzip.NewReader(bytes.NewReader(compressedBytes))
 	if err != nil {
 		return err
 	}
@@ -86,10 +86,8 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool,
 		jointBufferWriter = io.Discard
 	}
 	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
-	jointGzipWriter, _ := pgzip.NewWriterLevel(jointCountingCompressedWriter, pgzip.BestCompression)
-	jointGzipWriter.SetConcurrency(blockSize, 1)
-	soloGzipWriter, _ := pgzip.NewWriterLevel(io.Discard, pgzip.BestCompression) // writer will be reset
-	soloGzipWriter.SetConcurrency(blockSize, 1)
+	jointGzipWriter, _ := gzip.NewWriterLevel(jointCountingCompressedWriter, gzip.BestCompression)
+	soloGzipWriter, _ := gzip.NewWriterLevel(io.Discard, gzip.BestCompression) // writer will be reset
 
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
@@ -175,7 +173,7 @@ func ReadOriginal(fn string) ([]*TarEntry, error) {
 		return nil, err
 	}
 	defer f.Close()
-	gz, err := pgzip.NewReader(f)
+	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, err
 	}
