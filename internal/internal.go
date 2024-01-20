@@ -68,86 +68,79 @@ func Check(compressedBytes []byte, originalContents []*TarEntry) error {
 	return nil
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockSize int, soloCache map[int]int64) (int64, []byte) {
-	outputBufferWriter := &bytes.Buffer{}
-	jointCountingCompressedWriter := &CountingWriter{writer: io.Discard}
-	jointGzipWriter, _ := flate.NewWriter(jointCountingCompressedWriter, gzip.BestCompression)
-	soloGzipWriter, _ := flate.NewWriter(io.Discard, gzip.BestCompression) // writer will be reset
-	jointTarWriter := tar.NewWriter(jointGzipWriter)
+func partialEntry(originalContents []*TarEntry, i int, partialBlockSize int) ([]byte, *tar.Header) {
+	content := originalContents[i].Content
+	header := originalContents[i].Header
 
-	totalSoloCompressedSize := int64(0)
-	for _, i := range perm {
-		var content []byte
-		var header *tar.Header
+	if partialBlockSize > 0 && len(content) > partialBlockSize {
+		// if over threshold, copy first AND last blockSize-bytes
+		// not clear why this works so well, since it duplicates when content is less than 2xblockSize
+		content = append(content[:partialBlockSize], content[len(content)-partialBlockSize:]...)
 
-		// if content is larger than 2 x blockSize, and
-		if partialBlockSize > 0 && len(originalContents[i].Content) > partialBlockSize {
-			// if over threshold, copy first AND last blockSize-bytes
-			// not clear why this works so well, since it duplicates when content is less than 2xblockSize
-			content = append(originalContents[i].Content[:partialBlockSize], originalContents[i].Content[len(originalContents[i].Content)-partialBlockSize:]...)
-
-			// rewrite header size to new content size
-			headerStruct := *originalContents[i].Header
-			header = &headerStruct
-			header.Size = int64(len(content))
-		} else {
-			content = originalContents[i].Content
-			header = originalContents[i].Header
-		}
-
-		if err := jointTarWriter.WriteHeader(header); err != nil {
-			log.Fatal(err)
-		}
-
-		if _, err := jointTarWriter.Write(content); err != nil {
-			log.Fatal(err)
-		}
-
-		if cacheSize, ok := soloCache[i]; ok {
-			// fmt.Println("solo cache hit", i)
-
-			totalSoloCompressedSize += cacheSize
-
-			continue
-		}
-
-		soloCountingCompressedWriter := &CountingWriter{writer: io.Discard}
-		soloGzipWriter.Reset(soloCountingCompressedWriter)
-		soloTarWriter := tar.NewWriter(soloCountingCompressedWriter)
-
-		if err := soloTarWriter.WriteHeader(header); err != nil {
-			log.Fatal(err)
-		}
-
-		if _, err := soloTarWriter.Write(content); err != nil {
-			log.Fatal(err)
-		}
-
-		soloTarWriter.Close()
-		soloGzipWriter.Close()
-
-		soloCompressedSize := int64(soloCountingCompressedWriter.BytesWritten)
-		totalSoloCompressedSize += soloCompressedSize
-		soloCache[i] = soloCompressedSize
+		// rewrite header size to new content size
+		headerStruct := *header
+		header = &headerStruct
+		header.Size = int64(len(content))
 	}
 
-	jointTarWriter.Close()
+	return content, header
+}
+
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockSize int, soloCache map[int]int64) (int64, []byte) {
+	firstDictBuffer := &bytes.Buffer{}
+	firstTarWriter := tar.NewWriter(firstDictBuffer)
+
+	firstContent, firstHeader := partialEntry(originalContents, perm[0], partialBlockSize)
+	if err := firstTarWriter.WriteHeader(firstHeader); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := firstTarWriter.Write(firstContent); err != nil {
+		log.Fatal(err)
+	}
+	firstTarWriter.Close()
+	firstDictBytes := firstDictBuffer.Bytes()
+
+	soloCountingWriter := &CountingWriter{writer: io.Discard}
+	jointCountingWriter := &CountingWriter{writer: io.Discard}
+
+	soloGzipWriter, err := flate.NewWriter(soloCountingWriter, gzip.BestCompression)
+	if err != nil {
+		log.Fatal(err)
+	}
+	jointGzipWriter, err := flate.NewWriterDict(jointCountingWriter, gzip.BestCompression, firstDictBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	secondTarWriter := tar.NewWriter(io.MultiWriter(soloGzipWriter, jointGzipWriter))
+
+	secondContent, secondHeader := partialEntry(originalContents, perm[1], partialBlockSize)
+
+	if err := secondTarWriter.WriteHeader(secondHeader); err != nil {
+		log.Fatal(err)
+	}
+
+	if _, err := secondTarWriter.Write(secondContent); err != nil {
+		log.Fatal(err)
+	}
+
+	secondTarWriter.Close()
 	jointGzipWriter.Close()
+	soloGzipWriter.Close()
 
-	totalJointCompressedSize := int64(jointCountingCompressedWriter.BytesWritten)
-	totalCompressionDiff := totalSoloCompressedSize - totalJointCompressedSize
+	totalCompressionDiff := soloCountingWriter.BytesWritten - jointCountingWriter.BytesWritten
 
-	return totalCompressionDiff, outputBufferWriter.Bytes()
+	return totalCompressionDiff, nil
 }
 
 type CountingWriter struct {
 	writer       io.Writer
-	BytesWritten int
+	BytesWritten int64
 }
 
 func (w *CountingWriter) Write(p []byte) (n int, err error) {
 	n, err = w.writer.Write(p)
-	w.BytesWritten += n
+	w.BytesWritten += int64(n)
 	return n, err
 }
 
