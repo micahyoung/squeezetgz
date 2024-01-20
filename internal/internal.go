@@ -8,21 +8,10 @@ import (
 	"log"
 	"os"
 	"reflect"
-	"strconv"
 
+	"github.com/klauspost/compress/flate"
 	"github.com/klauspost/compress/gzip"
 )
-
-var (
-	// allow override with -ldflags "-X squeezetgz/internal.BlockSizeStr=44000"
-	BlockSizeStr = "44000"
-	blockSize, _ = strconv.Atoi(BlockSizeStr)
-)
-
-// func init() {
-// 	fmt.Println("blockSize", blockSize)
-// 	os.Exit(1)
-// }
 
 type TarEntry struct {
 	Header  *tar.Header
@@ -79,28 +68,23 @@ func Check(compressedBytes []byte, originalContents []*TarEntry) error {
 	return nil
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partial bool, soloCache map[int]int64) (int64, []byte) {
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockSize int, soloCache map[int]int64) (int64, []byte) {
 	outputBufferWriter := &bytes.Buffer{}
-	var jointBufferWriter io.Writer = outputBufferWriter
-	if partial {
-		jointBufferWriter = io.Discard
-	}
-	jointCountingCompressedWriter := &CountingWriter{writer: jointBufferWriter}
-	jointGzipWriter, _ := gzip.NewWriterLevel(jointCountingCompressedWriter, gzip.BestCompression)
-	soloGzipWriter, _ := gzip.NewWriterLevel(io.Discard, gzip.BestCompression) // writer will be reset
-
+	jointCountingCompressedWriter := &CountingWriter{writer: io.Discard}
+	jointGzipWriter, _ := flate.NewWriter(jointCountingCompressedWriter, gzip.BestCompression)
+	soloGzipWriter, _ := flate.NewWriter(io.Discard, gzip.BestCompression) // writer will be reset
 	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
 	totalSoloCompressedSize := int64(0)
 	for _, i := range perm {
 		var content []byte
 		var header *tar.Header
-		// if content is larger than 2 x blockSize, and
 
-		if partial && len(originalContents[i].Content) > blockSize {
+		// if content is larger than 2 x blockSize, and
+		if partialBlockSize > 0 && len(originalContents[i].Content) > partialBlockSize {
 			// if over threshold, copy first AND last blockSize-bytes
 			// not clear why this works so well, since it duplicates when content is less than 2xblockSize
-			content = append(originalContents[i].Content[:blockSize], originalContents[i].Content[len(originalContents[i].Content)-blockSize:]...)
+			content = append(originalContents[i].Content[:partialBlockSize], originalContents[i].Content[len(originalContents[i].Content)-partialBlockSize:]...)
 
 			// rewrite header size to new content size
 			headerStruct := *originalContents[i].Header
