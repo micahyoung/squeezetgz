@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
 	"runtime"
 	"slices"
 	"sort"
@@ -175,12 +174,8 @@ func recompress(fn string) error {
 
 	if *outFile != "" {
 		fmt.Printf("writing %s\n", *outFile)
-		f, err := os.Create(*outFile)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		if _, err := f.Write(compressedBytes); err != nil {
+
+		if err := internal.RewriteOriginal(fn, *outFile, bestPerm); err != nil {
 			return err
 		}
 	}

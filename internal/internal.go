@@ -186,3 +186,35 @@ func ReadOriginal(fn string) ([]*TarEntry, error) {
 
 	return originalContents, nil
 }
+
+func RewriteOriginal(infilepath, outfilepath string, outperm []int) error {
+	origEntries, err := ReadOriginal(infilepath)
+	if err != nil {
+		return err
+	}
+	outfile, err := os.Create(outfilepath)
+	if err != nil {
+		return err
+	}
+	defer outfile.Close()
+
+	gzipWriter, err := gzip.NewWriterLevel(outfile, gzip.BestCompression)
+	if err != nil {
+		return err
+	}
+	defer gzipWriter.Close()
+
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	for _, i := range outperm {
+		if err := tarWriter.WriteHeader(origEntries[i].Header); err != nil {
+			return err
+		}
+		if _, err := tarWriter.Write(origEntries[i].Content); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
