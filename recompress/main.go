@@ -8,7 +8,6 @@ package main
 
 import (
 	"archive/tar"
-	"bytes"
 	"flag"
 	"fmt"
 	"log"
@@ -16,8 +15,6 @@ import (
 	"slices"
 	"sort"
 	"squeezetgz/internal"
-
-	"github.com/klauspost/compress/gzip"
 )
 
 type job struct {
@@ -111,8 +108,8 @@ func getNextFiles(origPerm []int, origContent []*internal.TarEntry, jobs chan<- 
 	return bestBatchResults
 }
 
-func recompress(fn string) error {
-	originalContents, err := internal.ReadOriginal(fn)
+func recompress(infilepath string) error {
+	originalContents, err := internal.ReadOriginal(infilepath, int64(*blockSize))
 	if err != nil {
 		return err
 	}
@@ -150,32 +147,9 @@ func recompress(fn string) error {
 		log.Fatal("perm length does not match original contents length")
 	}
 
-	compressedBuffer := &bytes.Buffer{}
-	gzipWriter, _ := gzip.NewWriterLevel(compressedBuffer, gzip.BestCompression)
-	tarWriter := tar.NewWriter(gzipWriter)
-
-	for _, i := range bestPerm {
-		if err := tarWriter.WriteHeader(originalContents[i].Header); err != nil {
-			return err
-		}
-
-		if _, err := tarWriter.Write(originalContents[i].Content); err != nil {
-			return err
-		}
-	}
-
-	tarWriter.Close()
-	gzipWriter.Close()
-	compressedBytes := compressedBuffer.Bytes()
-
-	if err := internal.Check(compressedBytes, originalContents); err != nil {
-		return fmt.Errorf("comparing bytes: %w", err)
-	}
-
 	if *outFile != "" {
 		fmt.Printf("writing %s\n", *outFile)
-
-		if err := internal.RewriteOriginal(fn, *outFile, bestPerm); err != nil {
+		if err := internal.RewriteOriginal(infilepath, *outFile, bestPerm); err != nil {
 			return err
 		}
 	}
@@ -333,9 +307,9 @@ func compareCompression(a, b *result) bool {
 }
 
 func worker(id int, originalContents []*internal.TarEntry, jobs <-chan *job, results chan<- *result) {
-	soloCache := map[int]*internal.TarEntry{}
+	soloCache := map[int]int{}
 	for job := range jobs {
-		compressionFactor, _ := internal.RewritePermToBuffer(job.perm, originalContents, *blockSize, soloCache)
+		compressionFactor := internal.RewritePermToBuffer(job.perm, originalContents, soloCache)
 		results <- &result{job.perm, compressionFactor}
 	}
 }

@@ -9,6 +9,10 @@ import (
 	"log"
 )
 
+type CustomGzipWriter struct {
+    *gzip.Writer
+}
+
 // flags for tgz file
 var (
 	outFile = flag.String("o", "", "optional output file")

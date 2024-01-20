@@ -22,20 +22,18 @@ func main() {
 }
 
 func debug(fn string) error {
-	originalContents, err := internal.ReadOriginal(fn)
+	originalContents, err := internal.ReadOriginal(fn, 0)
 	if err != nil {
 		return err
 	}
 
 	totalFactor := int64(0)
-	partialCache, totalCache := map[int]int64{}, map[int]int64{}
 	for i := 1; i < len(originalContents)-2; i++ {
 		testPerm := []int{i - 1, i}
-		partialCompressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, true, partialCache)
-		totalCompressionFactor, _ := internal.RewritePermToBuffer(testPerm, originalContents, false, totalCache)
-		fmt.Printf("  %s (%s) %d:%d\n", originalContents[i].Header.Name, getTypeShort(originalContents[i].Header.Typeflag), partialCompressionFactor, totalCompressionFactor)
+		partialCompressionFactor := internal.RewritePermToBuffer(testPerm, originalContents, nil)
+		fmt.Printf("  %s (%s) %d\n", originalContents[i].Header.Name, getTypeShort(originalContents[i].Header.Typeflag), partialCompressionFactor)
 
-		totalFactor += totalCompressionFactor
+		totalFactor += partialCompressionFactor
 	}
 	fmt.Printf("total: %d\n", totalFactor)
 

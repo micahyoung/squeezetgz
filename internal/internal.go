@@ -18,13 +18,8 @@ type TarEntry struct {
 	Content []byte
 }
 
-func Check(compressedBytes []byte, originalContents []*TarEntry) error {
-	gzipReader, err := gzip.NewReader(bytes.NewReader(compressedBytes))
-	if err != nil {
-		return err
-	}
-	defer gzipReader.Close()
-	tarReader := tar.NewReader(gzipReader)
+func Check(tarFile io.Reader, originalContents []*TarEntry) error {
+	tarReader := tar.NewReader(tarFile)
 
 	originalContentNameLookup := map[string]int{}
 	for i, originalContent := range originalContents {
@@ -68,32 +63,10 @@ func Check(compressedBytes []byte, originalContents []*TarEntry) error {
 	return nil
 }
 
-func partialEntry(origEntry *TarEntry, partialBlockSize int) *TarEntry {
-	origContentSize := origEntry.Header.Size
-
-	// if over threshold, copy first AND last blockSize-bytes
-	// not clear why this works so well, since it duplicates when content is less than 2xblockSize
-	newContent := append(origEntry.Content[:partialBlockSize], origEntry.Content[int(origContentSize)-partialBlockSize:]...)
-
-	// clonse underlying header struct
-	headerStruct := *origEntry.Header
-	newHeader := &headerStruct
-	newHeader.Size = int64(len(newContent))
-
-	return &TarEntry{newHeader, newContent}
-}
-
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockSize int, partialCache map[int]*TarEntry) (int64, []byte) {
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialCache map[int]int) int64 {
 	var firstEntry *TarEntry
 	firstId := perm[0]
-	if cacheEntry, found := partialCache[firstId]; found {
-		firstEntry = cacheEntry
-	} else if partialBlockSize >= 0 && originalContents[firstId].Header.Size > int64(partialBlockSize) {
-		firstEntry = partialEntry(originalContents[firstId], partialBlockSize)
-		partialCache[firstId] = firstEntry
-	} else {
-		firstEntry = originalContents[firstId]
-	}
+	firstEntry = originalContents[firstId]
 
 	soloCountingWriter := &CountingWriter{writer: io.Discard}
 	jointCountingWriter := &CountingWriter{writer: io.Discard}
@@ -111,14 +84,7 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockS
 
 	var secondEntry *TarEntry
 	secondId := perm[1]
-	if cacheEntry, found := partialCache[secondId]; found {
-		secondEntry = cacheEntry
-	} else if partialBlockSize >= 0 && originalContents[secondId].Header.Size > int64(partialBlockSize) {
-		secondEntry = partialEntry(originalContents[secondId], partialBlockSize)
-		partialCache[secondId] = secondEntry
-	} else {
-		secondEntry = originalContents[secondId]
-	}
+	secondEntry = originalContents[secondId]
 
 	if err := secondTarWriter.WriteHeader(secondEntry.Header); err != nil {
 		log.Fatal(err)
@@ -134,7 +100,7 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockS
 
 	totalCompressionDiff := soloCountingWriter.BytesWritten - jointCountingWriter.BytesWritten
 
-	return totalCompressionDiff, nil
+	return totalCompressionDiff
 }
 
 type CountingWriter struct {
@@ -148,22 +114,17 @@ func (w *CountingWriter) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
-func ReadOriginal(fn string) ([]*TarEntry, error) {
+func ReadOriginal(fn string, partialBlockSize int64) ([]*TarEntry, error) {
 	f, err := os.Open(fn)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-	tarReader := tar.NewReader(gz)
+	tarReader := tar.NewReader(f)
 
 	originalContents := []*TarEntry{}
 	for {
-		hdr, err := tarReader.Next()
+		header, err := tarReader.Next()
 		if err == io.EOF {
 			break
 		}
@@ -176,8 +137,24 @@ func ReadOriginal(fn string) ([]*TarEntry, error) {
 			return nil, err
 		}
 
+		if partialBlockSize > 0 && header.Size > partialBlockSize {
+			// if over threshold, copy first AND last blockSize-bytes
+			// not clear why this works so well, since it duplicates when content is less than 2xblockSize
+			newContentBuffer := &bytes.Buffer{}
+			if _, err := io.Copy(newContentBuffer, bytes.NewReader(content[:partialBlockSize])); err != nil {
+				return nil, err
+			}
+			if _, err := io.Copy(newContentBuffer, bytes.NewReader(content[header.Size-partialBlockSize:])); err != nil {
+				return nil, err
+			}
+
+			content = newContentBuffer.Bytes()
+
+			header.Size = int64(newContentBuffer.Len())
+		}
+
 		entry := &TarEntry{
-			Header:  hdr,
+			Header:  header,
 			Content: content,
 		}
 
@@ -188,7 +165,7 @@ func ReadOriginal(fn string) ([]*TarEntry, error) {
 }
 
 func RewriteOriginal(infilepath, outfilepath string, outperm []int) error {
-	origEntries, err := ReadOriginal(infilepath)
+	origEntries, err := ReadOriginal(infilepath, 0)
 	if err != nil {
 		return err
 	}
@@ -198,13 +175,7 @@ func RewriteOriginal(infilepath, outfilepath string, outperm []int) error {
 	}
 	defer outfile.Close()
 
-	gzipWriter, err := gzip.NewWriterLevel(outfile, gzip.BestCompression)
-	if err != nil {
-		return err
-	}
-	defer gzipWriter.Close()
-
-	tarWriter := tar.NewWriter(gzipWriter)
+	tarWriter := tar.NewWriter(outfile)
 	defer tarWriter.Close()
 
 	for _, i := range outperm {
@@ -216,5 +187,11 @@ func RewriteOriginal(infilepath, outfilepath string, outperm []int) error {
 		}
 	}
 
+	outfile.Seek(0, 0)
+
+	if err := Check(outfile, origEntries); err != nil {
+		return err
+	}
+	
 	return nil
 }
