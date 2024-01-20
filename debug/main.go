@@ -28,9 +28,9 @@ func debug(fn string) error {
 	}
 
 	totalFactor := int64(0)
+	soloCache := map[int]int64{}
 	for i := 1; i < len(originalContents)-2; i++ {
-		testPerm := []int{i - 1, i}
-		partialCompressionFactor := internal.RewritePermToBuffer(testPerm, originalContents, nil)
+		partialCompressionFactor := internal.RewritePermToBuffer(i-1, i, originalContents, soloCache)
 		fmt.Printf("  %s (%s) %d\n", originalContents[i].Header.Name, getTypeShort(originalContents[i].Header.Typeflag), partialCompressionFactor)
 
 		totalFactor += partialCompressionFactor

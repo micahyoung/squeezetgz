@@ -307,9 +307,12 @@ func compareCompression(a, b *result) bool {
 }
 
 func worker(id int, originalContents []*internal.TarEntry, jobs <-chan *job, results chan<- *result) {
-	soloCache := map[int]int{}
+	soloCache := map[int]int64{}
 	for job := range jobs {
-		compressionFactor := internal.RewritePermToBuffer(job.perm, originalContents, soloCache)
+		if len(job.perm) < 2 {
+			log.Fatal("job.perm must be at least length 2")
+		}
+		compressionFactor := internal.RewritePermToBuffer(job.perm[0], job.perm[1], originalContents, soloCache)
 		results <- &result{job.perm, compressionFactor}
 	}
 }

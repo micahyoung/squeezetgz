@@ -63,42 +63,63 @@ func Check(tarFile io.Reader, originalContents []*TarEntry) error {
 	return nil
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialCache map[int]int) int64 {
-	var firstEntry *TarEntry
-	firstId := perm[0]
-	firstEntry = originalContents[firstId]
+func RewritePermToBuffer(firstId, secondId int, originalContents []*TarEntry, soloCache map[int]int64) int64 {
+	firstEntry := originalContents[firstId]
 
-	soloCountingWriter := &CountingWriter{writer: io.Discard}
 	jointCountingWriter := &CountingWriter{writer: io.Discard}
 
-	soloGzipWriter, err := flate.NewWriter(soloCountingWriter, gzip.BestCompression)
-	if err != nil {
-		log.Fatal(err)
-	}
 	jointGzipWriter, err := flate.NewWriterDict(jointCountingWriter, gzip.BestCompression, firstEntry.Content)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	secondTarWriter := tar.NewWriter(io.MultiWriter(soloGzipWriter, jointGzipWriter))
+	jointTarWriter := tar.NewWriter(jointGzipWriter)
 
-	var secondEntry *TarEntry
-	secondId := perm[1]
-	secondEntry = originalContents[secondId]
+	secondEntry := originalContents[secondId]
 
-	if err := secondTarWriter.WriteHeader(secondEntry.Header); err != nil {
+	if err := jointTarWriter.WriteHeader(secondEntry.Header); err != nil {
 		log.Fatal(err)
 	}
 
-	if _, err := secondTarWriter.Write(secondEntry.Content); err != nil {
+	if _, err := jointTarWriter.Write(secondEntry.Content); err != nil {
 		log.Fatal(err)
 	}
 
-	secondTarWriter.Close()
+	jointTarWriter.Close()
 	jointGzipWriter.Close()
-	soloGzipWriter.Close()
 
-	totalCompressionDiff := soloCountingWriter.BytesWritten - jointCountingWriter.BytesWritten
+	jointBytesWritten := jointCountingWriter.BytesWritten
+
+	var soloBytesWritten int64
+	if cacheBytesWritten, found := soloCache[secondId]; found {
+		soloBytesWritten = cacheBytesWritten
+	} else {
+		soloCountingWriter := &CountingWriter{writer: io.Discard}
+
+		soloGzipWriter, err := flate.NewWriter(soloCountingWriter, gzip.BestCompression)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		soloTarWriter := tar.NewWriter(soloGzipWriter)
+
+		if err := soloTarWriter.WriteHeader(secondEntry.Header); err != nil {
+			log.Fatal(err)
+		}
+
+		if _, err := soloTarWriter.Write(secondEntry.Content); err != nil {
+			log.Fatal(err)
+		}
+
+		soloTarWriter.Close()
+		soloGzipWriter.Close()
+
+		soloBytesWritten = soloCountingWriter.BytesWritten
+
+		soloCache[secondId] = soloBytesWritten
+	}
+
+	totalCompressionDiff := soloBytesWritten - jointBytesWritten
 
 	return totalCompressionDiff
 }
@@ -192,6 +213,6 @@ func RewriteOriginal(infilepath, outfilepath string, outperm []int) error {
 	if err := Check(outfile, origEntries); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
