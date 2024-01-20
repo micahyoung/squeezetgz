@@ -68,37 +68,32 @@ func Check(compressedBytes []byte, originalContents []*TarEntry) error {
 	return nil
 }
 
-func partialEntry(originalContents []*TarEntry, i int, partialBlockSize int) ([]byte, *tar.Header) {
-	content := originalContents[i].Content
-	header := originalContents[i].Header
+func partialEntry(origEntry *TarEntry, partialBlockSize int) *TarEntry {
+	origContentSize := origEntry.Header.Size
 
-	if partialBlockSize > 0 && len(content) > partialBlockSize {
-		// if over threshold, copy first AND last blockSize-bytes
-		// not clear why this works so well, since it duplicates when content is less than 2xblockSize
-		content = append(content[:partialBlockSize], content[len(content)-partialBlockSize:]...)
+	// if over threshold, copy first AND last blockSize-bytes
+	// not clear why this works so well, since it duplicates when content is less than 2xblockSize
+	newContent := append(origEntry.Content[:partialBlockSize], origEntry.Content[int(origContentSize)-partialBlockSize:]...)
 
-		// rewrite header size to new content size
-		headerStruct := *header
-		header = &headerStruct
-		header.Size = int64(len(content))
-	}
+	// clonse underlying header struct
+	headerStruct := *origEntry.Header
+	newHeader := &headerStruct
+	newHeader.Size = int64(len(newContent))
 
-	return content, header
+	return &TarEntry{newHeader, newContent}
 }
 
-func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockSize int, soloCache map[int]int64) (int64, []byte) {
-	firstDictBuffer := &bytes.Buffer{}
-	firstTarWriter := tar.NewWriter(firstDictBuffer)
-
-	firstContent, firstHeader := partialEntry(originalContents, perm[0], partialBlockSize)
-	if err := firstTarWriter.WriteHeader(firstHeader); err != nil {
-		log.Fatal(err)
+func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockSize int, partialCache map[int]*TarEntry) (int64, []byte) {
+	var firstEntry *TarEntry
+	firstId := perm[0]
+	if cacheEntry, found := partialCache[firstId]; found {
+		firstEntry = cacheEntry
+	} else if partialBlockSize >= 0 && originalContents[firstId].Header.Size > int64(partialBlockSize) {
+		firstEntry = partialEntry(originalContents[firstId], partialBlockSize)
+		partialCache[firstId] = firstEntry
+	} else {
+		firstEntry = originalContents[firstId]
 	}
-	if _, err := firstTarWriter.Write(firstContent); err != nil {
-		log.Fatal(err)
-	}
-	firstTarWriter.Close()
-	firstDictBytes := firstDictBuffer.Bytes()
 
 	soloCountingWriter := &CountingWriter{writer: io.Discard}
 	jointCountingWriter := &CountingWriter{writer: io.Discard}
@@ -107,20 +102,29 @@ func RewritePermToBuffer(perm []int, originalContents []*TarEntry, partialBlockS
 	if err != nil {
 		log.Fatal(err)
 	}
-	jointGzipWriter, err := flate.NewWriterDict(jointCountingWriter, gzip.BestCompression, firstDictBytes)
+	jointGzipWriter, err := flate.NewWriterDict(jointCountingWriter, gzip.BestCompression, firstEntry.Content)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	secondTarWriter := tar.NewWriter(io.MultiWriter(soloGzipWriter, jointGzipWriter))
 
-	secondContent, secondHeader := partialEntry(originalContents, perm[1], partialBlockSize)
+	var secondEntry *TarEntry
+	secondId := perm[1]
+	if cacheEntry, found := partialCache[secondId]; found {
+		secondEntry = cacheEntry
+	} else if partialBlockSize >= 0 && originalContents[secondId].Header.Size > int64(partialBlockSize) {
+		secondEntry = partialEntry(originalContents[secondId], partialBlockSize)
+		partialCache[secondId] = secondEntry
+	} else {
+		secondEntry = originalContents[secondId]
+	}
 
-	if err := secondTarWriter.WriteHeader(secondHeader); err != nil {
+	if err := secondTarWriter.WriteHeader(secondEntry.Header); err != nil {
 		log.Fatal(err)
 	}
 
-	if _, err := secondTarWriter.Write(secondContent); err != nil {
+	if _, err := secondTarWriter.Write(secondEntry.Content); err != nil {
 		log.Fatal(err)
 	}
 
