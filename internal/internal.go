@@ -14,11 +14,12 @@ import (
 )
 
 type TarEntry struct {
-	Header  *tar.Header
-	Content []byte
+	Header       *tar.Header
+	StartContent []byte
+	EndContent   []byte
 }
 
-func Check(tarFile io.Reader, originalContents []*TarEntry) error {
+func Check(tarFile io.Reader, originalContents []*tarStore) error {
 	tarReader := tar.NewReader(tarFile)
 
 	originalContentNameLookup := map[string]int{}
@@ -71,24 +72,17 @@ func RewritePermToBuffer(firstId, secondId int, originalContents []*TarEntry, so
 
 	jointCountingWriter := &CountingWriter{writer: io.Discard}
 
-	jointGzipWriter, err := flate.NewWriterDict(jointCountingWriter, gzip.BestCompression, firstEntry.Content)
+	jointGzipWriter, err := flate.NewWriterDict(jointCountingWriter, gzip.BestCompression, firstEntry.EndContent)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	jointTarWriter := tar.NewWriter(jointGzipWriter)
-
 	secondEntry := originalContents[secondId]
 
-	if err := jointTarWriter.WriteHeader(secondEntry.Header); err != nil {
+	if _, err := jointGzipWriter.Write(secondEntry.StartContent); err != nil {
 		log.Fatal(err)
 	}
 
-	if _, err := jointTarWriter.Write(secondEntry.Content); err != nil {
-		log.Fatal(err)
-	}
-
-	jointTarWriter.Close()
 	jointGzipWriter.Close()
 
 	jointBytesWritten := jointCountingWriter.BytesWritten
@@ -104,17 +98,10 @@ func RewritePermToBuffer(firstId, secondId int, originalContents []*TarEntry, so
 			log.Fatal(err)
 		}
 
-		soloTarWriter := tar.NewWriter(soloGzipWriter)
-
-		if err := soloTarWriter.WriteHeader(secondEntry.Header); err != nil {
+		if _, err := soloGzipWriter.Write(secondEntry.StartContent); err != nil {
 			log.Fatal(err)
 		}
 
-		if _, err := soloTarWriter.Write(secondEntry.Content); err != nil {
-			log.Fatal(err)
-		}
-
-		soloTarWriter.Close()
 		soloGzipWriter.Close()
 
 		soloBytesWritten = soloCountingWriter.BytesWritten
@@ -161,25 +148,37 @@ func ReadOriginal(fn string, partialBlockSize int64) ([]*TarEntry, error) {
 			return nil, err
 		}
 
-		if partialBlockSize > 0 && header.Size > partialBlockSize {
+		var startContent, endContent []byte
+		if partialBlockSize > 0 && header.Size > partialBlockSize*2 {
 			// if over threshold, copy only last partialBlockSize-bytes
-			newContentBuffer := &bytes.Buffer{}
-			bytesCount, err := io.Copy(newContentBuffer, bytes.NewReader(content[header.Size-partialBlockSize:]))
-			if err != nil {
+			startContentBuffer := &bytes.Buffer{}
+			endContentBuffer := &bytes.Buffer{}
+			if _, err := io.Copy(startContentBuffer, bytes.NewReader(content[:partialBlockSize])); err != nil {
 				return nil, err
 			}
-			if bytesCount != partialBlockSize {
-				return nil, fmt.Errorf("bytes copied mismatch: %d != %d", bytesCount, partialBlockSize)
+			if _, err := io.Copy(endContentBuffer, bytes.NewReader(content[header.Size-partialBlockSize:])); err != nil {
+				return nil, err
 			}
-
-			content = newContentBuffer.Bytes()
-
 			header.Size = partialBlockSize
+
+			if startContent, err = tarEntryToBytes(header, startContentBuffer.Bytes()); err != nil {
+				return nil, fmt.Errorf("long file start %w", err)
+			}
+			if endContent, err = tarEntryToBytes(header, endContentBuffer.Bytes()); err != nil {
+				return nil, fmt.Errorf("long file end %w", err)
+			}
+		} else {
+			startContent, err := tarEntryToBytes(header, content)
+			if err != nil {
+				return nil, fmt.Errorf("short file %w", err)
+			}
+			endContent = startContent
 		}
 
 		entry := &TarEntry{
-			Header:  header,
-			Content: content,
+			Header:       header,
+			StartContent: startContent,
+			EndContent:   endContent,
 		}
 
 		originalContents = append(originalContents, entry)
@@ -188,28 +187,78 @@ func ReadOriginal(fn string, partialBlockSize int64) ([]*TarEntry, error) {
 	return originalContents, nil
 }
 
+func tarEntryToBytes(tarHeader *tar.Header, tarContent []byte) ([]byte, error) {
+	buffer := &bytes.Buffer{}
+	tarWriter := tar.NewWriter(buffer)
+	if err := tarWriter.WriteHeader(tarHeader); err != nil {
+		return nil, err
+	}
+
+	if _, err := tarWriter.Write(tarContent); err != nil {
+		return nil, err
+	}
+	tarWriter.Close()
+
+	return buffer.Bytes(), nil
+}
+
+type tarStore struct {
+	Header  *tar.Header
+	Content []byte
+}
+
+func tarFileToEntries(tarFile io.Reader) ([]*tarStore, error) {
+	tarReader := tar.NewReader(tarFile)
+
+	var origEntries []*tarStore
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		content, err := io.ReadAll(tarReader)
+		if err != nil {
+			return nil, err
+		}
+
+		origEntries = append(origEntries, &tarStore{header, content})
+	}
+
+	return origEntries, nil
+}
+
 func RewriteOriginal(infilepath, outfilepath string, outperm []int) error {
-	origEntries, err := ReadOriginal(infilepath, 0)
+	infile, err := os.Open(infilepath)
 	if err != nil {
 		return err
 	}
+	defer infile.Close()
+
+	origEntries, err := tarFileToEntries(infile)
+	if err != nil {
+		return err
+	}
+
 	outfile, err := os.Create(outfilepath)
 	if err != nil {
 		return err
 	}
 	defer outfile.Close()
 
-	tarWriter := tar.NewWriter(outfile)
-	defer tarWriter.Close()
-
+	outTarWriter := tar.NewWriter(outfile)
 	for _, i := range outperm {
-		if err := tarWriter.WriteHeader(origEntries[i].Header); err != nil {
+		if err := outTarWriter.WriteHeader(origEntries[i].Header); err != nil {
 			return err
 		}
-		if _, err := tarWriter.Write(origEntries[i].Content); err != nil {
+		if _, err := outTarWriter.Write(origEntries[i].Content); err != nil {
 			return err
 		}
 	}
+	outTarWriter.Close()
 
 	outfile.Seek(0, 0)
 
