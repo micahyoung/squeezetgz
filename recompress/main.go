@@ -31,7 +31,7 @@ var (
 	outFile   = flag.String("o", "", "optional output file")
 	mode      = flag.Int("m", 0, "mode (0: default, 1: brute force)")
 	batchSize = flag.Int("b", 1, "batch size")
-	blockSize = flag.Int("k", 44000, "block size")
+	blockSize = flag.Int("k", 64000, "block size")
 	workers   = flag.Int("w", runtime.NumCPU()-1, "number of workers to use. Default: num CPUs - 1")
 )
 

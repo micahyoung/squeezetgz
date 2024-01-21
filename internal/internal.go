@@ -23,6 +23,9 @@ func Check(tarFile io.Reader, originalContents []*TarEntry) error {
 
 	originalContentNameLookup := map[string]int{}
 	for i, originalContent := range originalContents {
+		if _, found := originalContentNameLookup[originalContent.Header.Name]; found {
+			log.Fatalf("duplicate entry in original, can't proceed: %s", originalContent.Header.Name)
+		}
 		originalContentNameLookup[originalContent.Header.Name] = i
 	}
 
