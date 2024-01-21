@@ -109,7 +109,7 @@ func getNextFiles(origPerm []int, origContent []*internal.TarEntry, jobs chan<- 
 }
 
 func recompress(infilepath string) error {
-	originalContents, err := internal.ReadOriginal(infilepath, int64(*blockSize))
+	originalContents, err := internal.ReadOriginal(infilepath, *blockSize)
 	if err != nil {
 		return err
 	}

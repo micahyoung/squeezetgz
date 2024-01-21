@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"flag"
 	"fmt"
 	"log"
@@ -8,7 +9,7 @@ import (
 	"squeezetgz/internal"
 )
 
-// add flag to remove unclean files 
+// add flag to remove unclean files
 var (
 	cleanFlag = flag.Bool("rm", false, "remove unclean files")
 )
@@ -24,19 +25,29 @@ func main() {
 	}
 }
 
-func clean(referencePath string, testPaths ...string) error {
-	referenceContents, err := internal.ReadOriginal(referencePath, 0)
+func clean(referenceTarPath string, testTarGzipPaths ...string) error {
+	referenceTarFile, err := os.Open(referenceTarPath)
+	if err != nil {
+		return err
+	}
+	defer referenceTarFile.Close()
+
+	referenceContents, err := internal.TarFileToEntries(referenceTarFile)
 	if err != nil {
 		return err
 	}
 
-	for _, testPath := range testPaths {
+	for _, testPath := range testTarGzipPaths {
 		testfile, err := os.Open(testPath)
 		if err != nil {
 			return err
 		}
+		gzipReader, err := gzip.NewReader(testfile)
+		if err != nil {
+			return err
+		}
 
-		if err := internal.Check(testfile, referenceContents); err != nil {
+		if err := internal.Check(gzipReader, referenceContents); err != nil {
 			fmt.Printf("error checking: %s: %s\n", testPath, err.Error())
 			if *cleanFlag {
 				if err := os.Remove(testPath); err != nil {
