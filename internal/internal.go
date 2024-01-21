@@ -162,19 +162,19 @@ func ReadOriginal(fn string, partialBlockSize int64) ([]*TarEntry, error) {
 		}
 
 		if partialBlockSize > 0 && header.Size > partialBlockSize {
-			// if over threshold, copy first AND last blockSize-bytes
-			// not clear why this works so well, since it duplicates when content is less than 2xblockSize
+			// if over threshold, copy only last partialBlockSize-bytes
 			newContentBuffer := &bytes.Buffer{}
-			if _, err := io.Copy(newContentBuffer, bytes.NewReader(content[:partialBlockSize])); err != nil {
+			bytesCount, err := io.Copy(newContentBuffer, bytes.NewReader(content[header.Size-partialBlockSize:]))
+			if err != nil {
 				return nil, err
 			}
-			if _, err := io.Copy(newContentBuffer, bytes.NewReader(content[header.Size-partialBlockSize:])); err != nil {
-				return nil, err
+			if bytesCount != partialBlockSize {
+				return nil, fmt.Errorf("bytes copied mismatch: %d != %d", bytesCount, partialBlockSize)
 			}
 
 			content = newContentBuffer.Bytes()
 
-			header.Size = int64(newContentBuffer.Len())
+			header.Size = partialBlockSize
 		}
 
 		entry := &TarEntry{
